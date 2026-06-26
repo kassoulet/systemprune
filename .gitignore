@@ -1,0 +1,17 @@
+# Rust
+/target
+**/target
+**/*.rs.bk
+Cargo.lock
+
+# Editor
+.vscode/
+.idea/
+*.swp
+
+# Tauri build artifacts
+gui/icons/
+gui/gen/
+
+# TUI
+*.log

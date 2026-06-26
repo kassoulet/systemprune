@@ -1,0 +1,25 @@
+[package]
+name = "systemprune-core"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+description = "Engine-agnostic core for SystemPrune (scanners, models, orchestration)."
+
+[dependencies]
+serde = { workspace = true }
+serde_json = { workspace = true }
+thiserror = { workspace = true }
+tokio = { workspace = true }
+anyhow = { workspace = true }
+which = { workspace = true }
+regex = { workspace = true }
+once_cell = { workspace = true }
+async-trait = "0.1"
+tracing = "0.1"
+
+[dev-dependencies]
+tokio = { version = "1", features = ["macros", "rt-multi-thread", "process", "io-util", "sync", "time", "test-util"] }
+tempfile = "3"

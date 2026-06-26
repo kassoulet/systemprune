@@ -1,0 +1,20 @@
+[package]
+name = "systemprune-gui"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+description = "GTK4 desktop interface for SystemPrune."
+
+[[bin]]
+name = "systemprune-gui"
+path = "src/main.rs"
+
+[dependencies]
+systemprune-core = { workspace = true }
+anyhow = { workspace = true }
+tokio = { workspace = true }
+gtk = { workspace = true, features = ["v4_10"] }
+glib = { workspace = true }
