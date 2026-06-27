@@ -216,6 +216,16 @@ impl State {
 //     `None` instead of panicking if state is already borrowed.
 //     Use this inside callback bodies that may be re-entered
 //     and would rather skip the work than crash.
+//
+// **Audit conclusion:** every signal-firing call site inside a
+// `state.borrow()` scope is wrapped in `with_rebuilding`.  The
+// current call sites are: `set_active` in `make_item_row`,
+// `set_active` in `on_group_toggle_clicked`, the whole rebuild
+// in `rebuild_groups`, the `engines_list.append` loop in
+// `refresh_engines`, and the `set_label` / `set_sensitive`
+// calls in `update_group_toggle_button`.  Future signal-firing
+// call sites inside a `state.borrow()` scope should follow the
+// same pattern.
 
 /// Run a closure while `state.rebuilding` is `true`, so the
 /// per-item `toggled` callbacks see the flag and bail out of
@@ -514,16 +524,39 @@ fn refresh_engines(state: &Rc<RefCell<State>>, engines_list: &ListBox) {
     while let Some(row) = engines_list.row_at_index(0) {
         engines_list.remove(&row);
     }
-    let s = state.borrow();
-    for src in s.orchestrator.available_engines() {
-        let count = s.items.iter().filter(|i| i.source == src).count();
-        let row = ActionRow::builder()
-            .title(escape_markup(&src))
-            .subtitle(format!("{} item(s)", count))
-            .activatable(false)
-            .build();
-        engines_list.append(&row);
-    }
+    // Extract the per-source counts into a local `Vec` **before**
+    // any GTK work, so the state borrow is released before we
+    // fire signals.  This is the same "extract state-derived
+    // values into local variables" step from the safe
+    // signal-firing pattern (see `with_rebuilding` doc comment).
+    let per_source_count: Vec<(String, usize)> = {
+        let s = state.borrow();
+        s.orchestrator
+            .available_engines()
+            .into_iter()
+            .map(|src| {
+                let count = s.items.iter().filter(|i| i.source == src).count();
+                (src, count)
+            })
+            .collect()
+    };
+    // Wrap the signal-firing loop in `with_rebuilding` so any
+    // future signal handler that re-enters state (e.g. a
+    // `row-inserted` handler on `engines_list`) sees the flag
+    // and bails out of its own `state.borrow()`.  Today no
+    // such handler is connected, so the wrap is purely
+    // defensive — the audit conclusion is "every signal-firing
+    // call site inside a state-borrow scope is wrapped".
+    with_rebuilding(state, || {
+        for (src, count) in &per_source_count {
+            let row = ActionRow::builder()
+                .title(escape_markup(src))
+                .subtitle(format!("{} item(s)", count))
+                .activatable(false)
+                .build();
+            engines_list.append(&row);
+        }
+    });
 }
 
 fn rebuild_groups(state: &Rc<RefCell<State>>, groups_box: &GtkBox) {
@@ -925,9 +958,23 @@ fn update_group_toggle_button(state: &Rc<RefCell<State>>, cat: Category) {
         (safe_count, selected_count)
     };
     let render = compute_group_toggle_button_state(safe_count, selected_count);
-    if let Some(btn) = state.borrow().group_toggle_buttons.get(&cat) {
-        btn.set_label(render.label);
-        btn.set_sensitive(render.sensitive);
+    // Extract the button reference **before** firing signals, so
+    // the state borrow is released.  The GTK `set_label` and
+    // `set_sensitive` setters fire `notify::label` /
+    // `notify::sensitive` synchronously; today no handler for
+    // either signal re-enters state, but a future contributor
+    // could add one.  Wrapping the signal-firing calls in
+    // `with_rebuilding` ensures any such handler sees the
+    // `rebuilding` flag and bails out of its own
+    // `state.borrow()`.  This is the same defensive pattern
+    // applied to `set_active` in `make_item_row` and to the
+    // whole rebuild in `rebuild_groups`.
+    let btn = state.borrow().group_toggle_buttons.get(&cat).cloned();
+    if let Some(btn) = btn {
+        with_rebuilding(state, || {
+            btn.set_label(render.label);
+            btn.set_sensitive(render.sensitive);
+        });
     }
 }
 
@@ -1463,5 +1510,98 @@ mod tests {
                 .contains_key(&("docker".to_string(), "a".to_string())),
             "make_item_row should register the new checkbox in state.item_checkboxes"
         );
+    }
+
+    /// Regression test that pins the "`refresh_engines` must never
+    /// panic" contract enforced by the defensive `with_rebuilding`
+    /// wrap around the `engines_list.append(&row)` loop.
+    ///
+    /// The original `refresh_engines` held a `Ref<State>` (from
+    /// `state.borrow()`) across each `engines_list.append` call,
+    /// which fires the `row-inserted` signal synchronously.  Today
+    /// no `row-inserted` handler is connected, so the borrow
+    /// doesn't conflict.  But a future contributor who adds a
+    /// handler that calls `state.borrow()` or `state.borrow_mut()`
+    /// would hit "RefCell already mutably borrowed" without the
+    /// guard.  This test exercises the full function on a minimal
+    /// state and verifies it returns without panicking.
+    ///
+    /// Marked `#[ignore]` because GTK widget creation needs a
+    /// display server (X11 / Wayland / Xvfb).  Run manually with:
+    ///
+    /// ```bash
+    /// xvfb-run -a cargo test --package systemprune-gui -- --ignored
+    /// ```
+    #[test]
+    #[ignore = "requires a display server; run with `cargo test -- --ignored` under xvfb-run"]
+    fn refresh_engines_does_not_panic_when_refreshing() {
+        let state = Rc::new(RefCell::new(State::new(Orchestrator::new(vec![]))));
+        {
+            let mut s = state.borrow_mut();
+            s.items
+                .push(make_item("a", "docker", Status::Unused, Category::Image));
+            s.items
+                .push(make_item("b", "ollama", Status::Unused, Category::Model));
+        }
+        let engines_list = ListBox::new();
+
+        // This must not panic.  The `with_rebuilding` guard
+        // around the `engines_list.append` loop ensures any
+        // future `row-inserted` handler that re-enters state
+        // sees the flag and bails.
+        refresh_engines(&state, &engines_list);
+
+        // Sanity check: the function should have appended one
+        // row per available engine.
+        assert!(
+            engines_list.row_at_index(0).is_some(),
+            "refresh_engines should have appended at least one row"
+        );
+    }
+
+    /// Regression test that pins the "`update_group_toggle_button`
+    /// must never panic" contract enforced by the defensive
+    /// `with_rebuilding` wrap around `btn.set_label` /
+    /// `btn.set_sensitive`.
+    ///
+    /// The original `update_group_toggle_button` held a
+    /// `Ref<State>` (from `state.borrow()`) across both
+    /// `btn.set_label` and `btn.set_sensitive`, which fire
+    /// `notify::label` / `notify::sensitive` synchronously.
+    /// Today no handler for either signal re-enters state, so
+    /// the borrow doesn't conflict.  But a future contributor
+    /// who adds a handler that calls `state.borrow()` or
+    /// `state.borrow_mut()` would hit "RefCell already
+    /// mutably borrowed" without the guard.  This test
+    /// exercises the full function on a minimal state with a
+    /// cached button and verifies it returns without
+    /// panicking.
+    ///
+    /// Marked `#[ignore]` because GTK widget creation needs a
+    /// display server (X11 / Wayland / Xvfb).  Run manually with:
+    ///
+    /// ```bash
+    /// xvfb-run -a cargo test --package systemprune-gui -- --ignored
+    /// ```
+    #[test]
+    #[ignore = "requires a display server; run with `cargo test -- --ignored` under xvfb-run"]
+    fn update_group_toggle_button_does_not_panic_when_refreshing() {
+        let state = Rc::new(RefCell::new(State::new(Orchestrator::new(vec![]))));
+        {
+            let mut s = state.borrow_mut();
+            s.items
+                .push(make_item("a", "docker", Status::Unused, Category::Image));
+        }
+        let btn = Button::with_label("Select all");
+        state
+            .borrow_mut()
+            .group_toggle_buttons
+            .insert(Category::Image, btn.clone());
+
+        // This must not panic.  The `with_rebuilding` guard
+        // around the setter calls ensures any future
+        // `notify::label` or `notify::sensitive` handler that
+        // re-enters state sees the flag and bails.
+        update_group_toggle_button(&state, Category::Image);
     }
 }
