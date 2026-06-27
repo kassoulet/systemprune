@@ -28,8 +28,9 @@ regex = "1"
 once_cell = "1"
 ratatui = "0.27"
 crossterm = "0.28"
-gtk = { version = "0.8", package = "gtk4" }
+gtk = { version = "0.9", package = "gtk4" }
 glib = "0.20"
+adw = { version = "0.7", package = "libadwaita", features = ["v1_4"] }
 walkdir = "2"
 dirs = "5"
 

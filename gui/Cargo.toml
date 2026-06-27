@@ -16,5 +16,6 @@ path = "src/main.rs"
 systemprune-core = { workspace = true }
 anyhow = { workspace = true }
 tokio = { workspace = true }
-gtk = { workspace = true, features = ["v4_10"] }
+gtk = { workspace = true }
 glib = { workspace = true }
+adw = { workspace = true }

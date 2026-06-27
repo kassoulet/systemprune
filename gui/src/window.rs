@@ -1,20 +1,17 @@
-//! GTK4 desktop GUI for SystemPrune.
+//! Adwaita desktop GUI for SystemPrune.
 //!
 //! Layout:
 //!   * Header bar with Rescan / Delete Selected buttons
 //!   * Horizontal split: left = engine list, right = items grouped
-//!     by `Category`. Each group is a `gtk::Expander` with a
-//!     "Select all" button in the label widget.
+//!     by `Category`. Each group is an `adw::ExpanderRow` inside an
+//!     `adw::PreferencesGroup`.
 //!   * Status bar at the bottom
-//!
-//! Uses the simpler `gtk::ListBox` + `gtk::CheckButton` + `gtk::Label`
-//! widget set rather than `TreeView` / `TreeModel` / `CellRenderer`
-//! (most of which is deprecated since GTK 4.10).
 
-use gtk::prelude::*;
+use adw::prelude::*;
+use adw::{ActionRow, ExpanderRow, HeaderBar, PreferencesGroup};
 use gtk::{
-    Box as GtkBox, Button, CheckButton, Expander, Frame, HeaderBar, Label, ListBox,
-    ListBoxRow, Orientation, ScrolledWindow, Separator, Window,
+    Box as GtkBox, Button, CheckButton, Label, ListBox, Orientation,
+    ScrolledWindow, Separator,
 };
 use std::cell::RefCell;
 use std::collections::{BTreeMap, HashSet};
@@ -25,8 +22,8 @@ use systemprune_core::scanners::all_scanners;
 use systemprune_core::size::format_size;
 
 /// Build and present the main application window.
-pub fn build_window(app: &gtk::Application) {
-    let window = Window::builder()
+pub fn build_window(app: &adw::Application) {
+    let window = adw::ApplicationWindow::builder()
         .application(app)
         .title("SystemPrune")
         .default_width(960)
@@ -57,24 +54,26 @@ pub fn build_window(app: &gtk::Application) {
     outer.append(&main_box);
 
     // --- Engines sidebar (left) ---
-    let engines_frame = Frame::new(Some("Engines"));
-    engines_frame.set_size_request(200, -1);
     let engines_scroll = ScrolledWindow::new();
+    engines_scroll.set_size_request(200, -1);
     engines_scroll.set_hscrollbar_policy(gtk::PolicyType::Never);
     engines_scroll.set_vscrollbar_policy(gtk::PolicyType::Automatic);
     let engines_list = ListBox::new();
     engines_list.set_selection_mode(gtk::SelectionMode::Single);
+    engines_list.set_css_classes(&["navigation-sidebar"]);
     engines_scroll.set_child(Some(&engines_list));
-    engines_frame.set_child(Some(&engines_scroll));
-    main_box.append(&engines_frame);
+    main_box.append(&engines_scroll);
 
-    // --- Groups list (right): one expander per category ---
+    // --- Separator between sidebar and content ---
+    let vsep = Separator::new(Orientation::Vertical);
+    main_box.append(&vsep);
+
+    // --- Groups list (right): one expander row per category ---
     let items_scroll = ScrolledWindow::new();
     items_scroll.set_hexpand(true);
     items_scroll.set_vexpand(true);
-    let groups_list = ListBox::new();
-    groups_list.set_selection_mode(gtk::SelectionMode::None);
-    items_scroll.set_child(Some(&groups_list));
+    let groups_box = GtkBox::new(Orientation::Vertical, 0);
+    items_scroll.set_child(Some(&groups_box));
     main_box.append(&items_scroll);
 
     // --- Status bar ---
@@ -92,28 +91,18 @@ pub fn build_window(app: &gtk::Application) {
         let state = state.clone();
         let status_label = status.clone();
         let engines_list = engines_list.clone();
-        let groups_list = groups_list.clone();
+        let groups_box = groups_box.clone();
         rescan_button.connect_clicked(move |_| {
-            do_scan(
-                &state,
-                &status_label,
-                &engines_list,
-                &groups_list,
-            );
+            do_scan(&state, &status_label, &engines_list, &groups_box);
         });
     }
     {
         let state = state.clone();
         let status_label = status.clone();
         let engines_list = engines_list.clone();
-        let groups_list = groups_list.clone();
+        let groups_box = groups_box.clone();
         delete_button.connect_clicked(move |_| {
-            do_delete(
-                &state,
-                &status_label,
-                &engines_list,
-                &groups_list,
-            );
+            do_delete(&state, &status_label, &engines_list, &groups_box);
         });
     }
 
@@ -122,14 +111,9 @@ pub fn build_window(app: &gtk::Application) {
         let state = state.clone();
         let status_label = status.clone();
         let engines_list = engines_list.clone();
-        let groups_list = groups_list.clone();
+        let groups_box = groups_box.clone();
         window.connect_show(move |_| {
-            do_scan(
-                &state,
-                &status_label,
-                &engines_list,
-                &groups_list,
-            );
+            do_scan(&state, &status_label, &engines_list, &groups_box);
         });
     }
 
@@ -145,18 +129,14 @@ struct State {
     items: Vec<PrunableItem>,
     selected: HashSet<(String, String)>,
     busy: bool,
-    /// True while populating widgets during a rebuild. The
-    /// per-item toggle handler ignores events while this is set
-    /// so the programmatic ``set_active`` calls don't fire a
-    /// storm of redundant handler invocations.
+    /// True while populating widgets during a rebuild.
     rebuilding: bool,
     /// Cached group summary labels so per-item toggle handlers can
     /// update the "[sel/total]" display without a full rebuild.
     group_summary_labels: BTreeMap<Category, Label>,
-    /// Cached per-category expander so we can find them by category.
-    group_expanders: BTreeMap<Category, Expander>,
-    /// Cached per-category inner ListBox of item rows, keyed by
-    /// `(source, id)` -> CheckButton.
+    /// Cached per-category expander rows.
+    group_expander_rows: BTreeMap<Category, ExpanderRow>,
+    /// Per-item checkbox, keyed by `(source, id)`.
     item_checkboxes: BTreeMap<(String, String), CheckButton>,
 }
 
@@ -169,7 +149,7 @@ impl State {
             busy: false,
             rebuilding: false,
             group_summary_labels: BTreeMap::new(),
-            group_expanders: BTreeMap::new(),
+            group_expander_rows: BTreeMap::new(),
             item_checkboxes: BTreeMap::new(),
         }
     }
@@ -196,7 +176,7 @@ fn do_scan(
     state: &Rc<RefCell<State>>,
     status: &Label,
     engines_list: &ListBox,
-    groups_list: &ListBox,
+    groups_box: &GtkBox,
 ) {
     if state.borrow().busy {
         return;
@@ -218,7 +198,7 @@ fn do_scan(
         s.items = result.items;
         s.busy = false;
     }
-    rebuild_groups(state, groups_list);
+    rebuild_groups(state, groups_box);
     refresh_engines(state, engines_list);
     status.set_text(&format!("Found {} item(s).", count));
 }
@@ -227,7 +207,7 @@ fn do_delete(
     state: &Rc<RefCell<State>>,
     status: &Label,
     engines_list: &ListBox,
-    groups_list: &ListBox,
+    groups_box: &GtkBox,
 ) {
     if state.borrow().busy {
         return;
@@ -269,9 +249,6 @@ fn do_delete(
                 s.selected.remove(&(r.item.source.clone(), r.item.id.clone()));
             }
         }
-        // Keep everything except successfully-deleted items; failed
-        // items remain in the view so the user can see what went
-        // wrong.
         s.items.retain(|i| {
             !results
                 .iter()
@@ -279,7 +256,7 @@ fn do_delete(
         });
         s.busy = false;
     }
-    rebuild_groups(state, groups_list);
+    rebuild_groups(state, groups_box);
     refresh_engines(state, engines_list);
     status.set_text(&format!("Deleted {}, failed {}.", ok, fail));
 }
@@ -295,71 +272,52 @@ fn refresh_engines(state: &Rc<RefCell<State>>, engines_list: &ListBox) {
     let s = state.borrow();
     for src in s.orchestrator.available_engines() {
         let count = s.items.iter().filter(|i| i.source == src).count();
-        let label = Label::new(Some(&format!("{} ({})", src, count)));
-        label.set_xalign(0.0);
-        label.set_margin_start(8);
-        label.set_margin_end(8);
-        label.set_margin_top(4);
-        label.set_margin_bottom(4);
-        let row = ListBoxRow::new();
-        row.set_child(Some(&label));
+        let row = ActionRow::builder()
+            .title(&src)
+            .subtitle(&format!("{} item(s)", count))
+            .activatable(false)
+            .build();
         engines_list.append(&row);
     }
 }
 
-fn rebuild_groups(state: &Rc<RefCell<State>>, groups_list: &ListBox) {
-    // Mark the state as "rebuilding" so per-item toggle handlers
-    // ignore the programmatic ``set_active`` calls made during
-    // population.
+fn rebuild_groups(state: &Rc<RefCell<State>>, groups_box: &GtkBox) {
     state.borrow_mut().rebuilding = true;
-    // Clear existing rows.
-    while let Some(row) = groups_list.row_at_index(0) {
-        groups_list.remove(&row);
+    // Clear existing children.
+    while let Some(child) = groups_box.first_child() {
+        groups_box.remove(&child);
     }
-    // Reset caches.
     {
         let mut s = state.borrow_mut();
         s.group_summary_labels.clear();
-        s.group_expanders.clear();
+        s.group_expander_rows.clear();
         s.item_checkboxes.clear();
     }
-    // Snapshot the grouped items under a short-lived borrow so the
-    // builder closures don't hold the RefCell lock.
     let snapshot: Vec<(Category, Vec<PrunableItem>)> = state.borrow().grouped();
     for (cat, items) in snapshot {
-        append_group(state, groups_list, cat, &items);
+        append_group(state, groups_box, cat, &items);
     }
     state.borrow_mut().rebuilding = false;
 }
 
 fn append_group(
     state: &Rc<RefCell<State>>,
-    groups_list: &ListBox,
+    groups_box: &GtkBox,
     cat: Category,
     items: &[PrunableItem],
 ) {
-    let expander = Expander::new(None);
-
-    // --- Header label widget: title, [sel/total], Select all button ---
-    let header_box = GtkBox::new(Orientation::Horizontal, 8);
-    header_box.set_margin_start(4);
-    header_box.set_margin_end(4);
-
-    let title = Label::new(None);
-    title.set_markup(&format!(
-        "<b>{}</b>  ({} item{})",
-        cat.plural_label(),
+    // --- PreferencesGroup for this category ---
+    let group = PreferencesGroup::new();
+    group.set_title(cat.plural_label());
+    group.set_description(Some(&format!(
+        "{} item{}",
         items.len(),
         if items.len() == 1 { "" } else { "s" }
-    ));
-    title.set_xalign(0.0);
-    title.set_hexpand(true);
-    header_box.append(&title);
+    )));
 
+    // --- Summary label and select-all button in the header suffix ---
     let summary = Label::new(Some("[0/0]"));
     summary.set_xalign(1.0);
-    header_box.append(&summary);
-
     let select_all_btn = Button::with_label("Select all");
     select_all_btn.set_tooltip_text(Some("Toggle all safe-to-delete items in this group"));
     {
@@ -368,30 +326,31 @@ fn append_group(
             on_select_all_clicked(&state, cat);
         });
     }
-    header_box.append(&select_all_btn);
 
-    expander.set_label_widget(Some(&header_box));
+    // --- ExpanderRow for the group ---
+    let expander_row = ExpanderRow::new();
+    expander_row.set_title(cat.plural_label());
+    expander_row.set_subtitle(&format!(
+        "{} item{}",
+        items.len(),
+        if items.len() == 1 { "" } else { "s" }
+    ));
 
-    // --- Inner list of items ---
-    let inner_list = ListBox::new();
-    inner_list.set_selection_mode(gtk::SelectionMode::None);
+    // --- Add items directly as rows of the ExpanderRow ---
     for item in items {
         let row = make_item_row(state, item, cat);
-        inner_list.append(&row);
+        expander_row.add_row(&row);
     }
-    expander.set_child(Some(&inner_list));
-    expander.set_expanded(true);
+    expander_row.set_expanded(true);
 
-    // --- Wrap the expander in a ListBoxRow and append ---
-    let list_row = ListBoxRow::new();
-    list_row.set_child(Some(&expander));
-    groups_list.append(&list_row);
+    group.add(&expander_row);
+    groups_box.append(&group);
 
-    // --- Cache widgets and refresh the summary label ---
+    // --- Cache widgets ---
     {
         let mut s = state.borrow_mut();
         s.group_summary_labels.insert(cat, summary.clone());
-        s.group_expanders.insert(cat, expander.clone());
+        s.group_expander_rows.insert(cat, expander_row.clone());
     }
     update_group_summary(state, cat);
 }
@@ -400,22 +359,14 @@ fn make_item_row(
     state: &Rc<RefCell<State>>,
     item: &PrunableItem,
     cat: Category,
-) -> ListBoxRow {
-    let row = ListBoxRow::new();
-
-    // Horizontal box: [checkbox] [source] [status] [size] [name]
-    let hbox = GtkBox::new(Orientation::Horizontal, 12);
-    hbox.set_margin_start(8);
-    hbox.set_margin_end(8);
-    hbox.set_margin_top(2);
-    hbox.set_margin_bottom(2);
-
-    // Checkbox.
+) -> ActionRow {
     let key = (item.source.clone(), item.id.clone());
     let initially_selected = {
         let s = state.borrow();
         s.selected.contains(&key) && item.is_safe_to_delete()
     };
+
+    // --- Checkbox for selection ---
     let checkbox = CheckButton::new();
     checkbox.set_active(initially_selected);
     checkbox.set_sensitive(item.is_safe_to_delete());
@@ -427,36 +378,28 @@ fn make_item_row(
             on_item_toggled(&state, cb.is_active(), &item_source, &item_id, cat);
         });
     }
-    hbox.append(&checkbox);
 
-    // Source.
-    let source_label = Label::new(Some(&item.source));
-    source_label.set_width_chars(10);
-    source_label.set_xalign(0.0);
-    hbox.append(&source_label);
-
-    // Status.
-    let status_label = Label::new(Some(item.status.as_str()));
-    status_label.set_width_chars(10);
-    status_label.set_xalign(0.0);
-    hbox.append(&status_label);
-
-    // Size.
+    // --- Size label as suffix ---
     let size_label = Label::new(Some(&format_size(item.size_bytes as i64, true)));
-    size_label.set_width_chars(10);
     size_label.set_xalign(1.0);
-    hbox.append(&size_label);
+    size_label.set_margin_end(4);
 
-    // Name.
-    let name_label = Label::new(Some(&item.name));
-    name_label.set_xalign(0.0);
-    name_label.set_hexpand(true);
-    name_label.set_ellipsize(gtk::pango::EllipsizeMode::End);
-    hbox.append(&name_label);
+    // --- Status as suffix ---
+    let status_label = Label::new(Some(item.status.as_str()));
+    status_label.set_xalign(0.0);
+    status_label.set_width_chars(8);
+    status_label.set_margin_end(8);
 
-    row.set_child(Some(&hbox));
+    // --- ActionRow ---
+    let row = ActionRow::builder()
+        .title(&item.name)
+        .subtitle(&item.source)
+        .activatable(false)
+        .build();
+    row.add_prefix(&checkbox);
+    row.add_suffix(&status_label);
+    row.add_suffix(&size_label);
 
-    // Cache the checkbox for later "select all" updates.
     state.borrow_mut().item_checkboxes.insert(key, checkbox);
 
     row
@@ -496,16 +439,11 @@ fn on_item_toggled(
     id: &str,
     cat: Category,
 ) {
-    // Suppress events fired by the programmatic ``set_active`` calls
-    // we make while populating widgets.
     if state.borrow().rebuilding {
         return;
     }
     let key = (source.to_string(), id.to_string());
     let mut s = state.borrow_mut();
-    // Verify the item is still present and safe to delete; if it has
-    // disappeared or become unsafe, silently no-op (the checkbox
-    // should have been disabled by the rebuild anyway).
     let present_and_safe = s
         .items
         .iter()
@@ -523,7 +461,6 @@ fn on_item_toggled(
 }
 
 fn on_select_all_clicked(state: &Rc<RefCell<State>>, cat: Category) {
-    // Collect safe keys in the group under a short-lived borrow.
     let safe_keys: Vec<(String, String)> = {
         let s = state.borrow();
         s.items
@@ -551,7 +488,6 @@ fn on_select_all_clicked(state: &Rc<RefCell<State>>, cat: Category) {
             }
         }
     }
-    // Update each row's checkbox state to reflect the new selection.
     {
         let s = state.borrow();
         for k in &safe_keys {
