@@ -117,6 +117,7 @@ pub enum Status {
     Dangling,
     #[default]
     Unused,
+    Deleted,
 }
 
 impl Status {
@@ -126,11 +127,16 @@ impl Status {
             Status::Stopped => "stopped",
             Status::Dangling => "dangling",
             Status::Unused => "unused",
+            Status::Deleted => "deleted",
         }
     }
 
     pub fn is_active(&self) -> bool {
         matches!(self, Status::Active)
+    }
+
+    pub fn is_deleted(&self) -> bool {
+        matches!(self, Status::Deleted)
     }
 }
 
@@ -174,7 +180,7 @@ impl PrunableItem {
     /// predicate on [`Status`]; kept as a method so future logic
     /// (e.g. dependency checks) lives in one place.
     pub fn is_safe_to_delete(&self) -> bool {
-        !self.status.is_active()
+        !self.status.is_active() && !self.status.is_deleted()
     }
 
     /// Return a JSON-serialisable view of this item. Mirrors the

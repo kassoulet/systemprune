@@ -64,7 +64,7 @@ pub fn find_dirs_with_marker(root: &Path, marker_file: &str) -> Vec<(PathBuf, u6
     results
 }
 
-/// Delete a directory tree.
+/// Delete a directory tree by moving it to the trash.
 pub async fn delete_dir(path: &str) -> Result<(), EngineError> {
     let p = PathBuf::from(path);
     if !p.is_dir() {
@@ -77,9 +77,9 @@ pub async fn delete_dir(path: &str) -> Result<(), EngineError> {
         ));
     }
     tokio::task::spawn_blocking(move || {
-        std::fs::remove_dir_all(&p).map_err(|e| {
+        trash::delete(&p).map_err(|e| {
             EngineError::new(
-                format!("failed to delete {}: {e}", p.display()),
+                format!("failed to trash {}: {e}", p.display()),
                 "fs_scan",
                 vec![],
                 None,

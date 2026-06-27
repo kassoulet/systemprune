@@ -255,11 +255,14 @@ fn do_delete(
                 s.selected.remove(&(r.item.source.clone(), r.item.id.clone()));
             }
         }
-        s.items.retain(|i| {
-            !results
-                .iter()
-                .any(|r| r.success && r.item.source == i.source && r.item.id == i.id)
-        });
+        // Mark successfully deleted items instead of removing them.
+        for r in &results {
+            if r.success {
+                if let Some(item) = s.items.iter_mut().find(|i| i.source == r.item.source && i.id == r.item.id) {
+                    item.status = systemprune_core::models::Status::Deleted;
+                }
+            }
+        }
         s.busy = false;
     }
     rebuild_groups(state, groups_box);
@@ -408,14 +411,27 @@ fn make_item_row(
     status_label.set_margin_end(8);
 
     // --- ActionRow ---
+    let title = if item.status.is_deleted() {
+        format!("{} (deleted)", escape_markup(&item.name))
+    } else {
+        escape_markup(&item.name)
+    };
     let row = ActionRow::builder()
-        .title(escape_markup(&item.name))
+        .title(&title)
         .subtitle(escape_markup(&item.source))
         .activatable(false)
         .build();
     row.add_prefix(&checkbox);
     row.add_suffix(&status_label);
     row.add_suffix(&size_label);
+
+    // Deleted items get italic styling via CSS class.
+    if item.status.is_deleted() {
+        row.add_css_class("dim-label");
+        // GTK doesn't have a direct italic method on ActionRow,
+        // but we can use the CSS class to indicate deleted state.
+        // The checkbox is already insensitive from is_safe_to_delete().
+    }
 
     // --- Add tooltip with full path if available ---
     if let Some(path) = item.extra.get("path") {

@@ -21,7 +21,7 @@ use ratatui::widgets::{Block, Borders, Cell, Paragraph, Row, Table, TableState};
 use std::collections::{BTreeMap, HashSet};
 use std::io::Stdout;
 use std::time::Duration;
-use systemprune_core::models::{Category, PrunableItem};
+use systemprune_core::models::{Category, PrunableItem, Status};
 use systemprune_core::orchestrator::Orchestrator;
 use systemprune_core::scanners::all_scanners;
 use systemprune_core::size::format_size;
@@ -406,12 +406,14 @@ impl App {
                 self.selected.remove(&(r.item.source.clone(), r.item.id.clone()));
             }
         }
-        // Keep everything except successfully deleted items.
-        self.items.retain(|i| {
-            !results
-                .iter()
-                .any(|r| r.success && r.item.source == i.source && r.item.id == i.id)
-        });
+        // Mark successfully deleted items instead of removing them.
+        for r in &results {
+            if r.success {
+                if let Some(item) = self.items.iter_mut().find(|i| i.source == r.item.source && i.id == r.item.id) {
+                    item.status = Status::Deleted;
+                }
+            }
+        }
         let freed: u64 = results.iter().filter(|r| r.success).map(|r| r.item.size_bytes).sum();
         self.status = format!("Deleted {}, failed {}. Freed {}.", ok, fail, format_size(freed as i64, true));
         self.busy = false;
@@ -550,20 +552,32 @@ fn draw_table(f: &mut ratatui::Frame, app: &mut App, area: Rect) {
             DisplayRow::Item(idx) => {
                 let item = &app.items[*idx];
                 let key = (item.source.clone(), item.id.clone());
-                let mark = if !item.is_safe_to_delete() {
+                let mark = if item.status.is_deleted() {
+                    "\u{2717}"
+                } else if !item.is_safe_to_delete() {
                     "\u{1f512}"
                 } else if app.selected.contains(&key) {
                     "x"
                 } else {
                     " "
                 };
+                let name = if item.status.is_deleted() {
+                    format!("{} (deleted)", item.name)
+                } else {
+                    item.name.clone()
+                };
+                let style = if item.status.is_deleted() {
+                    Style::default().add_modifier(Modifier::ITALIC)
+                } else {
+                    Style::default()
+                };
                 Row::new(vec![
                     Cell::from(mark),
                     Cell::from(item.category.plural_label().to_string()),
                     Cell::from(item.status.as_str().to_string()),
                     Cell::from(format_size(item.size_bytes as i64, true)),
-                    Cell::from(item.name.clone()),
-                ])
+                    Cell::from(name),
+                ]).style(style)
             }
         })
         .collect();

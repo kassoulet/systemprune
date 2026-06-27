@@ -21,6 +21,7 @@ async-trait = "0.1"
 tracing = "0.1"
 walkdir = { workspace = true }
 dirs = { workspace = true }
+trash = { workspace = true }
 
 [dev-dependencies]
 tokio = { version = "1", features = ["macros", "rt-multi-thread", "process", "io-util", "sync", "time", "test-util"] }
