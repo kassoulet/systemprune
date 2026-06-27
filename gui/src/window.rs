@@ -141,6 +141,8 @@ struct State {
     group_expander_rows: BTreeMap<Category, ExpanderRow>,
     /// Per-item checkbox, keyed by `(source, id)`.
     item_checkboxes: BTreeMap<(String, String), CheckButton>,
+    /// Error messages for failed deletions, keyed by (source, id).
+    delete_errors: BTreeMap<(String, String), String>,
 }
 
 impl State {
@@ -157,6 +159,7 @@ impl State {
                 .expect("tokio runtime"),
             group_expander_rows: BTreeMap::new(),
             item_checkboxes: BTreeMap::new(),
+            delete_errors: BTreeMap::new(),
         }
     }
 
@@ -261,6 +264,10 @@ fn do_delete(
                 if let Some(item) = s.items.iter_mut().find(|i| i.source == r.item.source && i.id == r.item.id) {
                     item.status = systemprune_core::models::Status::Deleted;
                 }
+                s.delete_errors.remove(&(r.item.source.clone(), r.item.id.clone()));
+            } else if let Some(err) = &r.error {
+                let key = (r.item.source.clone(), r.item.id.clone());
+                s.delete_errors.insert(key, err.to_string());
             }
         }
         s.busy = false;
@@ -298,6 +305,14 @@ fn refresh_engines(state: &Rc<RefCell<State>>, engines_list: &ListBox) {
 
 fn rebuild_groups(state: &Rc<RefCell<State>>, groups_box: &GtkBox) {
     state.borrow_mut().rebuilding = true;
+    // Save expansion state before rebuilding.
+    let expansion_state: BTreeMap<Category, bool> = {
+        let s = state.borrow();
+        s.group_expander_rows
+            .iter()
+            .map(|(cat, row)| (*cat, row.is_expanded()))
+            .collect()
+    };
     // Clear existing children.
     while let Some(child) = groups_box.first_child() {
         groups_box.remove(&child);
@@ -310,6 +325,15 @@ fn rebuild_groups(state: &Rc<RefCell<State>>, groups_box: &GtkBox) {
     let snapshot: Vec<(Category, Vec<PrunableItem>)> = state.borrow().grouped();
     for (cat, items) in snapshot {
         append_group(state, groups_box, cat, &items);
+    }
+    // Restore expansion state after rebuilding.
+    {
+        let s = state.borrow();
+        for (cat, expanded) in &expansion_state {
+            if let Some(row) = s.group_expander_rows.get(cat) {
+                row.set_expanded(*expanded);
+            }
+        }
     }
     state.borrow_mut().rebuilding = false;
 }
@@ -385,11 +409,12 @@ fn make_item_row(
         let s = state.borrow();
         s.selected.contains(&key) && item.is_safe_to_delete()
     };
+    let has_error = state.borrow().delete_errors.contains_key(&key);
 
     // --- Checkbox for selection ---
     let checkbox = CheckButton::new();
     checkbox.set_active(initially_selected);
-    checkbox.set_sensitive(item.is_safe_to_delete());
+    checkbox.set_sensitive(item.is_safe_to_delete() && !has_error);
     {
         let state = state.clone();
         let item_source = item.source.clone();
@@ -413,6 +438,8 @@ fn make_item_row(
     // --- ActionRow ---
     let title = if item.status.is_deleted() {
         format!("{} (deleted)", escape_markup(&item.name))
+    } else if has_error {
+        format!("{} (failed)", escape_markup(&item.name))
     } else {
         escape_markup(&item.name)
     };
@@ -425,16 +452,17 @@ fn make_item_row(
     row.add_suffix(&status_label);
     row.add_suffix(&size_label);
 
-    // Deleted items get italic styling via CSS class.
+    // Styling for deleted or failed items.
     if item.status.is_deleted() {
         row.add_css_class("dim-label");
-        // GTK doesn't have a direct italic method on ActionRow,
-        // but we can use the CSS class to indicate deleted state.
-        // The checkbox is already insensitive from is_safe_to_delete().
+    } else if has_error {
+        row.add_css_class("error");
     }
 
-    // --- Add tooltip with full path if available ---
-    if let Some(path) = item.extra.get("path") {
+    // --- Add tooltip with error details, path, or project root ---
+    if let Some(err) = state.borrow().delete_errors.get(&key) {
+        row.set_tooltip_text(Some(err));
+    } else if let Some(path) = item.extra.get("path") {
         row.set_tooltip_text(Some(path));
     } else if let Some(root) = item.extra.get("project_root") {
         row.set_tooltip_text(Some(root));

@@ -8,8 +8,9 @@ The original spec covers Docker, Podman, Flatpak, Snap, and Ollama with
 a CLI / TUI / GUI triad. Everything below is **additive** — the
 existing API and data model must remain backward compatible.
 
-The Python and Rust implementations must implement the same set of
-extended features in lockstep (see [§10 Cross-stack parity](#10-cross-stack-parity)).
+The Rust implementation is the canonical one. Future ports to
+other languages or stacks must implement the same set of extended
+features in lockstep.
 
 ---
 
@@ -383,31 +384,7 @@ human-friendly formatting, suitable for cron logs and CI.
 
 ---
 
-## 10. Cross-stack parity
-
-The Python and Rust implementations must implement the same set of
-extended features in lockstep. A `parity.md` matrix in each
-repository tracks which feature is implemented in which stack, and
-the CI pipeline fails if either stack falls behind on a tier-1
-feature.
-
-Tier 1 (must match exactly):
-* CLI subcommands and flags
-* `PrunableItem` JSON schema
-* Exit codes
-
-Tier 2 (UI behaviour must match; minor differences allowed):
-* Sort orders
-* Filter expressions
-* TUI key bindings
-
-Tier 3 (UX improvements may diverge):
-* Notification style
-* Theme / colour palette
-
----
-
-## 11. Phased rollout
+## 10. Phased rollout
 
 | Phase | Features                              | Target  |
 | ----- | ------------------------------------- | ------- |

@@ -5,9 +5,6 @@ environments. SystemPrune wraps the native CLI tools for **Docker**,
 **Podman**, **Flatpak**, **Snap**, and **Ollama**, providing a single
 interface to analyze disk usage and safely clean up unused assets.
 
-This is the **Rust** implementation of [SystemPrune](../systemprune-py/specs.md).
-A Python implementation also exists in `../systemprune-py/`.
-
 ## Features
 
 - **Read-only analysis** — parses native CLI output (preferring JSON) to
@@ -21,8 +18,7 @@ A Python implementation also exists in `../systemprune-py/`.
   - **CLI** — non-interactive scriptable use.
   - **TUI** — Ratatui-based terminal interface with checkboxes and
     live progress.
-  - **GUI** — GTK4 native interface via `gtk4-rs` (same widget toolkit
-  as the Python implementation).
+  - **GUI** — GTK4 native interface via `gtk4-rs`.
 
 ## Workspace layout
 

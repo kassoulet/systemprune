@@ -59,6 +59,8 @@ struct App {
     sidebar_area: Rect,
     /// Set to true when the user presses q/Esc to quit.
     quit: bool,
+    /// Error messages for failed deletions, keyed by (source, id).
+    delete_errors: BTreeMap<(String, String), String>,
 }
 
 impl App {
@@ -74,6 +76,7 @@ impl App {
             display_rows: Vec::new(),
             sidebar_area: Rect::default(),
             quit: false,
+            delete_errors: BTreeMap::new(),
         }
     }
 
@@ -220,7 +223,10 @@ impl App {
         match self.cursor_row() {
             Some(DisplayRow::Item(idx)) => {
                 let item = &self.items[*idx];
-                if let Some(path) = item.extra.get("path") {
+                let key = (item.source.clone(), item.id.clone());
+                if let Some(err) = self.delete_errors.get(&key) {
+                    self.status = format!("Error: {}", err);
+                } else if let Some(path) = item.extra.get("path") {
                     self.status = path.clone();
                 } else if let Some(root) = item.extra.get("project_root") {
                     self.status = format!("{} ({})", item.name, root);
@@ -366,8 +372,6 @@ impl App {
         let item_count = result.items.len();
         let err_count = result.errors.len();
         self.items = result.items;
-        // Reset collapse state on every fresh scan.
-        self.collapsed = HashSet::new();
         self.rebuild_display_rows();
         if err_count > 0 {
             self.status = format!(
@@ -377,7 +381,10 @@ impl App {
         } else {
             self.status = format!("Found {} item(s).", item_count);
         }
-        if !self.display_rows.is_empty() {
+        // Preserve scroll position if possible, otherwise select first item.
+        if self.display_rows.is_empty() {
+            self.table_state.select(None);
+        } else if self.table_state.selected().map_or(true, |i| i >= self.display_rows.len()) {
             self.table_state.select(Some(0));
         }
         self.busy = false;
@@ -412,6 +419,10 @@ impl App {
                 if let Some(item) = self.items.iter_mut().find(|i| i.source == r.item.source && i.id == r.item.id) {
                     item.status = Status::Deleted;
                 }
+                self.delete_errors.remove(&(r.item.source.clone(), r.item.id.clone()));
+            } else if let Some(err) = &r.error {
+                let key = (r.item.source.clone(), r.item.id.clone());
+                self.delete_errors.insert(key, err.to_string());
             }
         }
         let freed: u64 = results.iter().filter(|r| r.success).map(|r| r.item.size_bytes).sum();
@@ -552,8 +563,11 @@ fn draw_table(f: &mut ratatui::Frame, app: &mut App, area: Rect) {
             DisplayRow::Item(idx) => {
                 let item = &app.items[*idx];
                 let key = (item.source.clone(), item.id.clone());
+                let has_error = app.delete_errors.contains_key(&key);
                 let mark = if item.status.is_deleted() {
                     "\u{2717}"
+                } else if has_error {
+                    "\u{2716}"
                 } else if !item.is_safe_to_delete() {
                     "\u{1f512}"
                 } else if app.selected.contains(&key) {
@@ -563,11 +577,15 @@ fn draw_table(f: &mut ratatui::Frame, app: &mut App, area: Rect) {
                 };
                 let name = if item.status.is_deleted() {
                     format!("{} (deleted)", item.name)
+                } else if has_error {
+                    format!("{} (failed)", item.name)
                 } else {
                     item.name.clone()
                 };
                 let style = if item.status.is_deleted() {
                     Style::default().add_modifier(Modifier::ITALIC)
+                } else if has_error {
+                    Style::default().fg(Color::Red)
                 } else {
                     Style::default()
                 };

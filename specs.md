@@ -25,18 +25,7 @@ To ensure stability and prevent UI freezing during I/O intensive tasks (like `do
 
 ## 4. Tech Stack Recommendations
 
-### Option A: The Python Stack (Recommended for Speed of Development)
-
-Python is exceptionally strong at subprocess management and JSON parsing, making it ideal for a CLI orchestrator.
-
-| Component | Technology | Rationale |
-| --- | --- | --- |
-| **Backend Logic** | Python 3.11+ | Built-in `subprocess` module and `asyncio` for non-blocking CLI calls. |
-| **TUI Frontend** | Textual | Modern, async-first Python TUI framework with CSS styling. |
-| **GUI Frontend** | PyGObject (GTK4) | Native integration with the GNOME desktop environment. |
-| **Distribution** | PyPI / pipx / Flathub | `pipx` for isolated CLI installs, Flathub for the GUI. |
-
-### Option B: The Rust Stack (Recommended for Performance & Distribution)
+### The Rust Stack (Recommended for Performance & Distribution)
 
 Rust creates a single, self-contained binary with strict memory safety and excellent concurrency.
 
