@@ -16,6 +16,7 @@ pub enum Engine {
     PythonVenv,
     Tox,
     Mypy,
+    GoCache,
 }
 
 impl Engine {
@@ -30,6 +31,7 @@ impl Engine {
             Engine::PythonVenv => "python_venv",
             Engine::Tox => "tox",
             Engine::Mypy => "mypy",
+            Engine::GoCache => "go_cache",
         }
     }
 
@@ -45,6 +47,7 @@ impl Engine {
             Engine::PythonVenv => "Python venv",
             Engine::Tox => "Tox",
             Engine::Mypy => "Mypy",
+            Engine::GoCache => "Go Cache",
         }
     }
 }

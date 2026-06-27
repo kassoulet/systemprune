@@ -4,6 +4,7 @@ pub mod base;
 pub mod docker;
 pub mod flatpak;
 pub mod fs_scan;
+pub mod go_cache;
 pub mod mypy;
 pub mod node_modules;
 pub mod ollama;
@@ -58,5 +59,6 @@ pub fn all_scanners() -> Vec<Arc<dyn Scanner>> {
         Arc::new(python_venv::PythonVenvScanner::new()),
         Arc::new(tox::ToxScanner::new()),
         Arc::new(mypy::MypyScanner::new()),
+        Arc::new(go_cache::GoCacheScanner::new()),
     ]
 }
