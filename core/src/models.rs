@@ -18,6 +18,7 @@ pub enum Engine {
     Mypy,
     GoCache,
     Conda,
+    CargoCache,
 }
 
 impl Engine {
@@ -34,6 +35,7 @@ impl Engine {
             Engine::Mypy => "mypy",
             Engine::GoCache => "go_cache",
             Engine::Conda => "conda",
+            Engine::CargoCache => "cargo_cache",
         }
     }
 
@@ -51,6 +53,7 @@ impl Engine {
             Engine::Mypy => "Mypy",
             Engine::GoCache => "Go Cache",
             Engine::Conda => "Conda",
+            Engine::CargoCache => "Cargo Cache",
         }
     }
 }

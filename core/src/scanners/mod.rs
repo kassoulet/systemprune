@@ -1,6 +1,7 @@
 //! Per-engine scanner implementations.
 
 pub mod base;
+pub mod cargo_cache;
 pub mod conda;
 pub mod docker;
 pub mod flatpak;
@@ -62,5 +63,6 @@ pub fn all_scanners() -> Vec<Arc<dyn Scanner>> {
         Arc::new(mypy::MypyScanner::new()),
         Arc::new(go_cache::GoCacheScanner::new()),
         Arc::new(conda::CondaScanner::new()),
+        Arc::new(cargo_cache::CargoCacheScanner::new()),
     ]
 }
