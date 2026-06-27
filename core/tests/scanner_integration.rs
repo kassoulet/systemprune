@@ -365,6 +365,133 @@ esac
 }
 
 // ---------------------------------------------------------------------------
+// Go build cache: env GOCACHE parsing, size, and `go clean -cache`.
+// ---------------------------------------------------------------------------
+
+#[tokio::test]
+async fn go_cache_reports_and_cleans_via_fake_go_binary() {
+    let _guard = PATH_LOCK.lock().unwrap_or_else(|p| p.into_inner());
+    let tmp = TempDir::new().unwrap();
+
+    // Create the fake build-cache directory with a file so
+    // `dir_size` returns a non-zero value.  The
+    // "non-existent cache dir" branch is exercised in its
+    // own sub-test below.
+    let cache_dir = tmp.path().join("go-build");
+    std::fs::create_dir_all(&cache_dir).unwrap();
+    std::fs::write(cache_dir.join("entry.txt"), "x").unwrap();
+
+    // The fake `go` script.  For `go env GOCACHE` it echoes
+    // the cache path on stdout (real `go` writes a single
+    // trailing-newline-terminated line).  For `go clean
+    // -cache` it touches a marker file and exits 0.
+    let marker = tmp.path().join("clean_called");
+    let script = format!(
+        r#"#!/bin/sh
+case "$1 $2" in
+  "env GOCACHE")
+    printf '{cache}\n'
+    ;;
+  "clean -cache")
+    : >> {marker}
+    exit 0
+    ;;
+esac
+"#,
+        cache = cache_dir.display(),
+        marker = marker.display(),
+    );
+    make_script(tmp.path(), "go", &script);
+    set_path_locked(tmp.path());
+
+    let scanner = find_scanner("go_cache");
+    let items = scanner.get_items().await.unwrap();
+
+    assert_eq!(
+        items.len(),
+        1,
+        "the fake `go env GOCACHE` should produce exactly one item"
+    );
+    let item = &items[0];
+    assert_eq!(item.id, cache_dir.display().to_string());
+    assert_eq!(item.name, "Go build cache");
+    assert_eq!(item.source, "go_cache");
+    assert_eq!(item.engine, CoreEngine::GoCache);
+    assert_eq!(item.category, Category::BuildCache);
+    assert_eq!(item.status, Status::Unused);
+    assert!(
+        item.size_bytes > 0,
+        "size should be computed from the cache directory (got {})",
+        item.size_bytes
+    );
+    assert_eq!(
+        item.extra.get("path"),
+        Some(&cache_dir.display().to_string())
+    );
+
+    // `delete_item` must invoke `go clean -cache` and
+    // succeed when the fake binary exits 0.  The marker
+    // file is the proof that the script was actually called.
+    let result = scanner.delete_item(item).await;
+    assert!(result.is_ok(), "delete_item should succeed: {:?}", result);
+    assert!(
+        marker.exists(),
+        "go clean -cache should have been called by delete_item"
+    );
+}
+
+#[tokio::test]
+async fn go_cache_skips_when_gocache_path_missing() {
+    let _guard = PATH_LOCK.lock().unwrap_or_else(|p| p.into_inner());
+    let tmp = TempDir::new().unwrap();
+
+    // The fake `go` reports a cache path that does NOT
+    // exist on disk.  The scanner must treat this as "no
+    // cache yet" and return an empty list, not an error.
+    let missing = tmp.path().join("no-cache-here");
+    let script = format!(
+        r#"#!/bin/sh
+if [ "$1 $2" = "env GOCACHE" ]; then
+  printf '{p}\n'
+fi
+"#,
+        p = missing.display(),
+    );
+    make_script(tmp.path(), "go", &script);
+    set_path_locked(tmp.path());
+
+    let scanner = find_scanner("go_cache");
+    let items = scanner.get_items().await.unwrap();
+    assert!(
+        items.is_empty(),
+        "non-existent GOCACHE path must produce no items, got {items:?}"
+    );
+}
+
+#[tokio::test]
+async fn go_cache_skips_when_gocache_stdout_is_empty() {
+    let _guard = PATH_LOCK.lock().unwrap_or_else(|p| p.into_inner());
+    let tmp = TempDir::new().unwrap();
+
+    // The fake `go` returns an empty line for `go env
+    // GOCACHE`.  The scanner must not panic on the empty
+    // path and must return an empty list.
+    make_script(
+        tmp.path(),
+        "go",
+        "#!/bin/sh\n[ \"$1 $2\" = \"env GOCACHE\" ] || exit 0\n",
+    );
+    set_path_locked(tmp.path());
+
+    let scanner = find_scanner("go_cache");
+    let items = scanner.get_items().await.unwrap();
+    assert!(
+        items.is_empty(),
+        "empty GOCACHE stdout must produce no items, got {items:?}"
+    );
+}
+
+// ---------------------------------------------------------------------------
 // ``BaseScanner::run`` propagates stderr on non-zero exit codes.
 // ---------------------------------------------------------------------------
 
