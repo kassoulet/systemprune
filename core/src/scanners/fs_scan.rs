@@ -21,10 +21,16 @@ pub fn home() -> PathBuf {
     dirs::home_dir().unwrap_or_else(|| PathBuf::from("/"))
 }
 
+/// Directories to always skip when scanning the home directory.
+/// These contain tool state/config that should not be cleaned.
+pub const HOME_EXCLUDE: &[&str] = &[".tox", ".config", ".nvm"];
+
 /// Walk `root` looking for directories whose *file name* matches `dir_name`.
 /// Returns `(path, size_bytes)` for each match, skipping symlinks and
 /// directories that cannot be stat'd.
-pub fn find_dirs_named(root: &Path, dir_name: &str) -> Vec<(PathBuf, u64)> {
+///
+/// `exclude` is a list of directory names to skip entirely (and not recurse into).
+pub fn find_dirs_named(root: &Path, dir_name: &str, exclude: &[&str]) -> Vec<(PathBuf, u64)> {
     let mut results = Vec::new();
     for entry in WalkDir::new(root)
         .follow_links(false)
@@ -34,7 +40,11 @@ pub fn find_dirs_named(root: &Path, dir_name: &str) -> Vec<(PathBuf, u64)> {
         if !entry.file_type().is_dir() {
             continue;
         }
-        if entry.file_name().to_string_lossy() == dir_name {
+        let name = entry.file_name().to_string_lossy();
+        if exclude.contains(&name.as_ref()) {
+            continue;
+        }
+        if name == dir_name {
             let size = dir_size(entry.path());
             results.push((entry.path().to_path_buf(), size));
         }
@@ -44,7 +54,9 @@ pub fn find_dirs_named(root: &Path, dir_name: &str) -> Vec<(PathBuf, u64)> {
 
 /// Walk `root` looking for directories that contain a marker file.
 /// Returns `(path, size_bytes)` for each match.
-pub fn find_dirs_with_marker(root: &Path, marker_file: &str) -> Vec<(PathBuf, u64)> {
+///
+/// `exclude` is a list of directory names to skip entirely (and not recurse into).
+pub fn find_dirs_with_marker(root: &Path, marker_file: &str, exclude: &[&str]) -> Vec<(PathBuf, u64)> {
     let mut results = Vec::new();
     for entry in WalkDir::new(root)
         .follow_links(false)
@@ -53,6 +65,10 @@ pub fn find_dirs_with_marker(root: &Path, marker_file: &str) -> Vec<(PathBuf, u6
         .filter_map(|e| e.ok())
     {
         if !entry.file_type().is_dir() {
+            continue;
+        }
+        let name = entry.file_name().to_string_lossy();
+        if exclude.contains(&name.as_ref()) {
             continue;
         }
         let candidate = entry.path().join(marker_file);

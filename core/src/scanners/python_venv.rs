@@ -3,7 +3,7 @@
 //! Detects venvs by looking for the `pyvenv.cfg` marker file that
 //! CPython creates in every virtual environment.
 
-use super::fs_scan::{delete_dir, find_dirs_with_marker, home};
+use super::fs_scan::{delete_dir, find_dirs_with_marker, home, HOME_EXCLUDE};
 use super::Scanner;
 use crate::errors::EngineError;
 use crate::models::{Category, Engine, PrunableItem, Status};
@@ -45,7 +45,7 @@ impl Scanner for PythonVenvScanner {
 
     async fn get_items(&self) -> Result<Vec<PrunableItem>, EngineError> {
         let root = home();
-        let found = find_dirs_with_marker(&root, MARKER);
+        let found = find_dirs_with_marker(&root, MARKER, HOME_EXCLUDE);
         let items = found
             .into_iter()
             .map(|(path, size)| {
@@ -89,7 +89,7 @@ mod tests {
         fs::write(venv.join(MARKER), "").unwrap();
 
         let root = tmp.path().to_path_buf();
-        let found = find_dirs_with_marker(&root, MARKER);
+        let found = find_dirs_with_marker(&root, MARKER, &[]);
         assert_eq!(found.len(), 1);
         assert_eq!(found[0].0, venv);
     }

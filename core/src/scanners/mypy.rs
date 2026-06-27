@@ -3,7 +3,7 @@
 //! The mypy type checker stores cache files in `.mypy_cache` folders
 //! that can accumulate over time.
 
-use super::fs_scan::{delete_dir, find_dirs_named, home};
+use super::fs_scan::{delete_dir, find_dirs_named, home, HOME_EXCLUDE};
 use super::Scanner;
 use crate::errors::EngineError;
 use crate::models::{Category, Engine, PrunableItem, Status};
@@ -44,7 +44,7 @@ impl Scanner for MypyScanner {
 
     async fn get_items(&self) -> Result<Vec<PrunableItem>, EngineError> {
         let root = home();
-        let found = find_dirs_named(&root, ".mypy_cache");
+        let found = find_dirs_named(&root, ".mypy_cache", HOME_EXCLUDE);
         let items = found
             .into_iter()
             .map(|(path, size)| {
@@ -87,7 +87,7 @@ mod tests {
         fs::create_dir_all(&cache).unwrap();
 
         let root = tmp.path().to_path_buf();
-        let found = find_dirs_named(&root, ".mypy_cache");
+        let found = find_dirs_named(&root, ".mypy_cache", &[]);
         assert_eq!(found.len(), 1);
         assert_eq!(found[0].0, cache);
     }
