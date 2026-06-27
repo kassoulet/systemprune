@@ -17,6 +17,7 @@ pub enum Engine {
     Tox,
     Mypy,
     GoCache,
+    Conda,
 }
 
 impl Engine {
@@ -32,6 +33,7 @@ impl Engine {
             Engine::Tox => "tox",
             Engine::Mypy => "mypy",
             Engine::GoCache => "go_cache",
+            Engine::Conda => "conda",
         }
     }
 
@@ -48,6 +50,7 @@ impl Engine {
             Engine::Tox => "Tox",
             Engine::Mypy => "Mypy",
             Engine::GoCache => "Go Cache",
+            Engine::Conda => "Conda",
         }
     }
 }

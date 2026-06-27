@@ -249,6 +249,122 @@ fi
 }
 
 // ---------------------------------------------------------------------------
+// Conda: env list parsing, base-env skip, stale-path skip, and remove.
+// ---------------------------------------------------------------------------
+
+#[tokio::test]
+async fn conda_lists_and_removes_envs() {
+    let _guard = PATH_LOCK.lock().unwrap_or_else(|p| p.into_inner());
+    let tmp = TempDir::new().unwrap();
+
+    // Create two real env directories with a file each so
+    // `dir_size` returns a non-zero value.  Also leave a
+    // `staleenv` path in the fake output that points at a
+    // directory we never create, to exercise the stale-path
+    // skip in `get_items`.
+    let env_a = tmp.path().join("envs").join("myenv");
+    let env_b = tmp.path().join("envs").join("otherenv");
+    let stale_env = tmp.path().join("envs").join("staleenv");
+    for env in [&env_a, &env_b] {
+        std::fs::create_dir_all(env).unwrap();
+        std::fs::write(env.join("file.txt"), "x").unwrap();
+    }
+    // `base` is intentionally NOT created: the scanner must
+    // skip it for two reasons (name == "base" AND path missing).
+    let base_path = tmp.path().join("base_missing");
+
+    // The fake `conda` script.  It echoes a hard-coded env list
+    // for `conda env list` (base + 3 named envs) and writes a
+    // marker file + exits 0 for `conda env remove -p ... -y`.
+    // The paths are baked in via `format!` so the script can
+    // be written verbatim by `make_script`.
+    let marker = tmp.path().join("remove_called");
+    let script = format!(
+        r#"#!/bin/sh
+case "$1 $2" in
+  "env list")
+    printf '# conda environments:\n#\n'
+    printf 'base {base}\n'
+    printf 'myenv {a}\n'
+    printf 'otherenv {b}\n'
+    printf 'staleenv {stale}\n'
+    ;;
+  "env remove")
+    : >> {marker}
+    exit 0
+    ;;
+esac
+"#,
+        base = base_path.display(),
+        a = env_a.display(),
+        b = env_b.display(),
+        stale = stale_env.display(),
+        marker = marker.display(),
+    );
+    make_script(tmp.path(), "conda", &script);
+    set_path_locked(tmp.path());
+
+    let scanner = find_scanner("conda");
+    let items = scanner.get_items().await.unwrap();
+
+    // Four envs listed (base + 3), but `base` is skipped by
+    // name and `staleenv` is skipped because its path does not
+    // exist.  Two items must remain.
+    assert_eq!(
+        items.len(),
+        2,
+        "base env must be skipped by name and staleenv must be skipped by missing path"
+    );
+
+    let by_id: std::collections::HashMap<_, _> =
+        items.iter().map(|i| (i.id.clone(), i)).collect();
+    let myenv = by_id
+        .get(&env_a.display().to_string())
+        .expect("myenv must be present");
+    let otherenv = by_id
+        .get(&env_b.display().to_string())
+        .expect("otherenv must be present");
+    assert!(
+        !by_id.contains_key(&base_path.display().to_string()),
+        "base env must not be reported"
+    );
+    assert!(
+        !by_id.contains_key(&stale_env.display().to_string()),
+        "stale env (missing path) must not be reported"
+    );
+
+    // Per-item metadata for myenv.
+    assert_eq!(myenv.name, "myenv");
+    assert_eq!(myenv.source, "conda");
+    assert_eq!(myenv.engine, CoreEngine::Conda);
+    assert_eq!(myenv.category, Category::PythonVenv);
+    assert_eq!(myenv.status, Status::Unused);
+    assert!(
+        myenv.size_bytes > 0,
+        "size should be computed from the env directory (got {})",
+        myenv.size_bytes
+    );
+    assert_eq!(myenv.extra.get("env_name"), Some(&"myenv".to_string()));
+    assert_eq!(myenv.extra.get("path"), Some(&env_a.display().to_string()));
+
+    // otherenv has the same shape.
+    assert_eq!(otherenv.name, "otherenv");
+    assert_eq!(otherenv.category, Category::PythonVenv);
+    assert!(otherenv.size_bytes > 0);
+
+    // `delete_item` must invoke `conda env remove -p <path> -y`
+    // and succeed when the fake binary exits 0.  The marker
+    // file is the proof that the script was actually called
+    // with the expected arguments.
+    let result = scanner.delete_item(myenv).await;
+    assert!(result.is_ok(), "delete_item should succeed: {:?}", result);
+    assert!(
+        marker.exists(),
+        "remove script should have been called by delete_item"
+    );
+}
+
+// ---------------------------------------------------------------------------
 // ``BaseScanner::run`` propagates stderr on non-zero exit codes.
 // ---------------------------------------------------------------------------
 
