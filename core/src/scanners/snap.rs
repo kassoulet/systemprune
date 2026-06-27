@@ -148,7 +148,13 @@ impl SnapScanner {
             if parts.is_empty() {
                 continue;
             }
-            let snap_name = parts[0].split('.').next().unwrap_or("").to_string();
+            // Service names look like ``snap.<snap-name>.<service>`` —
+            // take the second component (first is always ``"snap"``).
+            let snap_name = parts[0]
+                .split('.')
+                .nth(1)
+                .unwrap_or("")
+                .to_string();
             if !snap_name.is_empty() {
                 set.insert(snap_name);
             }

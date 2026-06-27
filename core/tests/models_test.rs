@@ -50,14 +50,15 @@ fn category_label_handles_underscores() {
 
 #[test]
 fn category_plural_label_is_human_friendly() {
-    assert_eq!(Category::Image.plural_label(), "Images");
-    assert_eq!(Category::Container.plural_label(), "Containers");
-    assert_eq!(Category::Volume.plural_label(), "Volumes");
-    assert_eq!(Category::Network.plural_label(), "Networks");
+    assert_eq!(Category::Image.plural_label(), "Docker Images");
+    assert_eq!(Category::Container.plural_label(), "Docker Containers");
+    assert_eq!(Category::Volume.plural_label(), "Docker Volumes");
+    assert_eq!(Category::Network.plural_label(), "Docker Networks");
     assert_eq!(Category::BuildCache.plural_label(), "Build caches");
     assert_eq!(Category::SnapRevision.plural_label(), "Snap revisions");
-    assert_eq!(Category::Model.plural_label(), "Models");
-    assert_eq!(Category::App.plural_label(), "Apps");
+    assert_eq!(Category::Model.plural_label(), "Ollama Models");
+    assert_eq!(Category::App.plural_label(), "Flatpak Apps");
+    assert_eq!(Category::Runtime.plural_label(), "Flatpak Runtimes");
     assert_eq!(Category::Other.plural_label(), "Other");
 }
 

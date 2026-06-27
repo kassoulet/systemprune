@@ -1,0 +1,273 @@
+//! End-to-end integration tests for each built-in scanner.
+//!
+//! Exercises the scan → parse → classify path against scripted
+//! "engine" binaries so we can detect regressions like the
+//! Podman `{{.ID}}` vs `{{.ImageID}}` bug and the lost malformed-line
+//! resilience without depending on Docker / Podman / etc. being
+//! installed.
+//!
+//! # Test isolation
+//!
+//! Every test mutates the process-level ``PATH`` environment
+//! variable and then runs a subprocess that consults ``PATH`` to
+//! find the fake engine binary. Cargo's default worker pool runs
+//! tests in parallel, so without serialisation test B's
+//! ``set_var(\"PATH\", …)`` would race with test A's subprocess
+//! lookup. Each test therefore acquires :data:`PATH_LOCK` at the
+//! top and holds it until the end of its body.
+
+use std::collections::HashSet;
+use std::os::unix::fs::OpenOptionsExt;
+use std::path::PathBuf;
+use std::sync::Mutex;
+use systemprune_core::models::{Category, Engine as CoreEngine, PrunableItem, Status};
+use systemprune_core::scanners::base::BaseScanner;
+use systemprune_core::scanners::Scanner;
+use tempfile::TempDir;
+
+/// Serialises tests that mutate the process ``PATH``.
+static PATH_LOCK: Mutex<()> = Mutex::new(());
+
+fn make_script(dir: &std::path::Path, name: &str, body: &str) -> PathBuf {
+    let p = dir.join(name);
+    std::fs::OpenOptions::new()
+        .create(true)
+        .write(true)
+        .mode(0o755)
+        .open(&p)
+        .unwrap();
+    std::fs::write(&p, body).unwrap();
+    p
+}
+
+/// Replace ``PATH`` with *dir* prepended. Caller **must** already
+/// hold :data:`PATH_LOCK`.
+fn set_path_locked(dir: &std::path::Path) {
+    let current = std::env::var("PATH").unwrap_or_default();
+    let next = format!(
+        "{}:{}",
+        dir.to_string_lossy(),
+        if current.is_empty() {
+            String::new()
+        } else {
+            current
+        }
+    );
+    std::env::set_var("PATH", &next);
+}
+
+fn find_scanner(source: &str) -> std::sync::Arc<dyn Scanner> {
+    systemprune_core::scanners::all_scanners()
+        .into_iter()
+        .find(|s| s.source() == source)
+        .unwrap_or_else(|| panic!("missing scanner for source={}", source))
+}
+
+// ---------------------------------------------------------------------------
+// Podman: regression test for the {{.ImageID}} bug.
+// ---------------------------------------------------------------------------
+
+#[tokio::test]
+async fn podman_marks_in_use_image_as_active() {
+    let _guard = PATH_LOCK.lock().unwrap_or_else(|p| p.into_inner());
+    let tmp = TempDir::new().unwrap();
+    make_script(
+        tmp.path(),
+        "podman",
+        r#"#!/bin/sh
+case "$1" in
+  images)
+    printf '[{"Id":"img-in-use:abcdef012345","Names":["myapp"],"Size":"142 MB","Repository":"myapp","Tag":"v1"},{"Id":"img-orphan:fedcba987654","Names":["unused"],"Size":"5 MB","Repository":"unused","Tag":"latest"}]'
+    ;;
+  ps)
+    echo "myapp    img-in-use:abcdef012345"
+    ;;
+esac
+"#,
+    );
+    set_path_locked(tmp.path());
+    let scanner = find_scanner("podman");
+    let items = scanner.get_items().await.unwrap();
+    let by_id: std::collections::HashMap<_, _> =
+        items.iter().map(|i| (i.id.clone(), i)).collect();
+
+    assert_eq!(
+        by_id["img-in-use:abcdef012345"].status,
+        Status::Active,
+        "the in-use image must be detected via the ImageID template"
+    );
+    assert_eq!(by_id["img-orphan:fedcba987654"].status, Status::Unused);
+}
+
+// ---------------------------------------------------------------------------
+// Docker: malformed JSON lines must be skipped without aborting the scan.
+// ---------------------------------------------------------------------------
+
+#[tokio::test]
+async fn docker_skips_malformed_image_json_lines() {
+    let _guard = PATH_LOCK.lock().unwrap_or_else(|p| p.into_inner());
+    let tmp = TempDir::new().unwrap();
+    make_script(
+        tmp.path(),
+        "docker",
+        r#"#!/bin/sh
+case "$1" in
+  images)
+    printf '%s\n%s\n%s\n' \
+      '{"ID":"sha256:abc123dead","Repository":"nginx","Tag":"latest","Size":"142 MB","CreatedSince":"2 days ago","CreatedAt":"2024"}' \
+      'not json at all' \
+      '{"ID":"sha256:fedcba","Repository":"<none>","Tag":"<none>","Size":"0B","CreatedSince":"","CreatedAt":""}'
+    ;;
+  ps)
+    if [ "$2" = "-a" ]; then
+      printf '{"ID":"cnt1","Names":"web","State":"exited","Image":"nginx:latest","Size":"0B"}\n'
+    else
+      printf 'nginx:latest sha256:abc123dead\n'
+    fi
+    ;;
+esac
+"#,
+    );
+    set_path_locked(tmp.path());
+    let scanner = find_scanner("docker");
+    let items = scanner.get_items().await.unwrap();
+    let by_id: std::collections::HashMap<_, _> =
+        items.iter().map(|i| (i.id.clone(), i)).collect();
+
+    assert!(!by_id.contains_key("not json at all"));
+    assert_eq!(by_id["sha256:abc123dead"].status, Status::Active);
+    assert_eq!(by_id["sha256:fedcba"].status, Status::Dangling);
+}
+
+#[tokio::test]
+async fn docker_keeps_exited_containers() {
+    let _guard = PATH_LOCK.lock().unwrap_or_else(|p| p.into_inner());
+    let tmp = TempDir::new().unwrap();
+    make_script(
+        tmp.path(),
+        "docker",
+        r#"#!/bin/sh
+if [ "$1" = "ps" ]; then
+  printf '{"ID":"cnt1","Names":"web","State":"exited","Image":"nginx:latest","Size":"0B"}\n'
+elif [ "$1" = "images" ]; then
+  echo ""
+fi
+"#,
+    );
+    set_path_locked(tmp.path());
+    let scanner = find_scanner("docker");
+    let items = scanner.get_items().await.unwrap();
+    let containers: Vec<_> =
+        items.iter().filter(|i| i.category == Category::Container).collect();
+    assert_eq!(containers.len(), 1);
+    assert_eq!(containers[0].status, Status::Stopped);
+}
+
+// ---------------------------------------------------------------------------
+// Flatpak: column parsing + active-app detection.
+// ---------------------------------------------------------------------------
+
+#[tokio::test]
+async fn flatpak_marks_running_app_as_active() {
+    let _guard = PATH_LOCK.lock().unwrap_or_else(|p| p.into_inner());
+    let tmp = TempDir::new().unwrap();
+    make_script(
+        tmp.path(),
+        "flatpak",
+        r#"#!/bin/sh
+if echo "$@" | grep -q '\-\-app'; then
+  printf 'Application ID   Size   Runtime\n'
+  printf 'org.gimp.GIMP    142.1 MB   org.gnome.Platform/x86_64/45\n'
+else
+  printf 'Application   Size   Runtime   Arch   Branch\n'
+  printf 'org.gnome.Platform   1.2 GB   master   x86_64   45\n'
+fi
+if [ "$1" = "ps" ]; then
+  echo "Application"
+  echo "org.gimp.GIMP"
+fi
+"#,
+    );
+    set_path_locked(tmp.path());
+    let scanner = find_scanner("flatpak");
+    let items = scanner.get_items().await.unwrap();
+    let by_id: std::collections::HashMap<_, _> =
+        items.iter().map(|i| (i.id.clone(), i)).collect();
+
+    assert_eq!(by_id["org.gimp.GIMP"].status, Status::Active);
+    assert_eq!(by_id["org.gimp.GIMP"].category, Category::App);
+    assert_eq!(by_id["org.gnome.Platform"].status, Status::Unused);
+    assert_eq!(by_id["org.gnome.Platform"].category, Category::Runtime);
+}
+
+// ---------------------------------------------------------------------------
+// Snap: protected snaps are filtered out and active services are detected.
+// ---------------------------------------------------------------------------
+
+#[tokio::test]
+async fn snap_filters_protected_and_marks_running_service() {
+    let _guard = PATH_LOCK.lock().unwrap_or_else(|p| p.into_inner());
+    let tmp = TempDir::new().unwrap();
+    make_script(
+        tmp.path(),
+        "snap",
+        r#"#!/bin/sh
+if [ "$1" = "list" ]; then
+  printf 'Name   Version   Rev   Size\n'
+  printf 'firefox   1234   4567   250 MB\n'
+  printf 'snapd   2.61   21184   30 MB\n'
+elif [ "$1" = "services" ]; then
+  printf 'Service   Startup   Current\n'
+  printf 'snap.firefox.daemon   enabled   active\n'
+fi
+"#,
+    );
+    set_path_locked(tmp.path());
+    let scanner = find_scanner("snap");
+    let items = scanner.get_items().await.unwrap();
+
+    let names: HashSet<&str> = items.iter().map(|i| i.id.as_str()).collect();
+    assert!(names.contains("firefox"));
+    assert!(!names.contains("snapd"), "snapd is protected and must be omitted");
+
+    let firefox = items.iter().find(|i| i.id == "firefox").unwrap();
+    assert_eq!(firefox.status, Status::Active);
+
+    let result = scanner
+        .delete_item(&PrunableItem {
+            id: "snapd".into(),
+            name: "snapd".into(),
+            engine: CoreEngine::Snap,
+            source: "snap".into(),
+            category: Category::SnapRevision,
+            size_bytes: 0,
+            status: Status::Unused,
+            extra: Default::default(),
+        })
+        .await;
+    assert!(result.is_err());
+}
+
+// ---------------------------------------------------------------------------
+// ``BaseScanner::run`` propagates stderr on non-zero exit codes.
+// ---------------------------------------------------------------------------
+
+#[tokio::test]
+async fn base_scanner_run_returns_stderr_on_failure() {
+    let _guard = PATH_LOCK.lock().unwrap_or_else(|p| p.into_inner());
+    let tmp = TempDir::new().unwrap();
+    make_script(
+        tmp.path(),
+        "failbin",
+        "#!/bin/sh\necho intentional failure 1>&2\nexit 7\n",
+    );
+    set_path_locked(tmp.path());
+    let base = BaseScanner::new("failbin", CoreEngine::Docker, "failbin");
+    let err = base
+        .run(&["failbin"], 5)
+        .await
+        .expect_err("failbin exits 7");
+    assert_eq!(err.returncode, Some(7));
+    assert!(err.stderr.contains("intentional failure"));
+    assert_eq!(err.engine, "failbin");
+}

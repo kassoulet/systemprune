@@ -8,6 +8,7 @@ use crate::size::parse_size;
 use async_trait::async_trait;
 use serde::Deserialize;
 use std::collections::BTreeMap;
+use tracing::warn;
 
 const TIMEOUT_SECS: u64 = 60;
 
@@ -123,7 +124,7 @@ impl PodmanScanner {
             .base
             .run(&["podman", "images", "-a", "--format", "json"], TIMEOUT_SECS)
             .await?;
-        let data = parse_json_maybe_array(&out)?;
+        let data = parse_json_maybe_array(&out);
         let mut items: Vec<PrunableItem> = Vec::new();
         for entry in data {
             let img: PodmanImage = serde_json::from_value(entry).map_err(|e| {
@@ -184,7 +185,7 @@ impl PodmanScanner {
             .base
             .run(&["podman", "ps", "-a", "--format", "json"], TIMEOUT_SECS)
             .await?;
-        let data = parse_json_maybe_array(&out)?;
+        let data = parse_json_maybe_array(&out);
         let mut items: Vec<PrunableItem> = Vec::new();
         for entry in data {
             let c: PodmanContainer = serde_json::from_value(entry).map_err(|e| {
@@ -230,7 +231,7 @@ impl PodmanScanner {
             .base
             .run(&["podman", "volume", "ls", "--format", "json"], TIMEOUT_SECS)
             .await?;
-        let data = parse_json_maybe_array(&out)?;
+        let data = parse_json_maybe_array(&out);
         let mut items: Vec<PrunableItem> = Vec::new();
         for entry in data {
             let v: PodmanVolume = serde_json::from_value(entry).map_err(|e| {
@@ -266,7 +267,7 @@ impl PodmanScanner {
             .base
             .run(&["podman", "network", "ls", "--format", "json"], TIMEOUT_SECS)
             .await?;
-        let data = parse_json_maybe_array(&out)?;
+        let data = parse_json_maybe_array(&out);
         let mut items: Vec<PrunableItem> = Vec::new();
         for entry in data {
             let n: PodmanNetwork = serde_json::from_value(entry).map_err(|e| {
@@ -301,15 +302,34 @@ impl PodmanScanner {
     }
 
     async fn active_container_image_ids(&self) -> std::collections::HashSet<String> {
+        // `{{.ID}}` is the *container* ID — we explicitly want the
+        // *image* ID, which is exposed as `{{.ImageID}}`. Using the
+        // wrong field silently marked in-use images as safe to delete,
+        // which was a critical safety bug.
         let Ok((out, _)) = self
             .base
-            .run(&["podman", "ps", "--format", "{{.Image}} {{.ID}}"], TIMEOUT_SECS)
+            .run(
+                &["podman", "ps", "--format", "{{.Image}} {{.ImageID}}"],
+                TIMEOUT_SECS,
+            )
             .await
         else {
             return std::collections::HashSet::new();
         };
         let mut set: std::collections::HashSet<String> = std::collections::HashSet::new();
         for line in out.lines() {
+            // ``--format "{{.Image}} {{.ImageID}}"`` does NOT emit a
+            // header row, so we parse every non-empty line. If a
+            // future implementation switches back to a table format
+            // and emits a literal ``Image  ImageID`` header, the
+            // split would still produce 2 entries and we'd silently
+            // have a header in the set; callers tolerate this
+            // because no real image ID matches the literal header
+            // string.
+            let line = line.trim();
+            if line.is_empty() {
+                continue;
+            }
             let parts: Vec<&str> = line.split_whitespace().collect();
             if parts.len() >= 2 {
                 set.insert(parts[1].to_string());
@@ -320,21 +340,31 @@ impl PodmanScanner {
 }
 
 /// Podman emits either a JSON array or line-delimited JSON. Handle both.
-fn parse_json_maybe_array(out: &str) -> Result<Vec<serde_json::Value>, EngineError> {
+///
+/// Both branches are lenient: malformed entries are dropped with a
+/// warning so a single bad line does not abort the whole scan.
+/// This matches the resilience contract in the Python podman
+/// scanner (``systemprune.scanners.podman._parse_json_lines``) and
+/// in the Docker scanners on both stacks. The function never
+/// returns an error because the scanner surfaces malformation only
+/// as a ``warn!`` log line; callers should always be able to fall
+/// back to an empty list.
+fn parse_json_maybe_array(out: &str) -> Vec<serde_json::Value> {
     let text = out.trim();
     if text.is_empty() {
-        return Ok(vec![]);
+        return vec![];
     }
     if text.starts_with('[') {
-        serde_json::from_str::<Vec<serde_json::Value>>(text).map_err(|e| {
-            EngineError::new(
-                format!("podman JSON array: {}", e),
-                "podman",
-                vec![],
-                None,
-                e.to_string(),
-            )
-        })
+        match serde_json::from_str::<Vec<serde_json::Value>>(text) {
+            Ok(arr) => arr.into_iter().filter(|v| v.is_object()).collect(),
+            Err(e) => {
+                warn!(
+                    "podman: dropping malformed JSON array ({}); returning empty result",
+                    e
+                );
+                vec![]
+            }
+        }
     } else {
         let mut out: Vec<serde_json::Value> = Vec::new();
         for line in text.lines() {
@@ -342,20 +372,20 @@ fn parse_json_maybe_array(out: &str) -> Result<Vec<serde_json::Value>, EngineErr
             if line.is_empty() {
                 continue;
             }
-            let v: serde_json::Value = serde_json::from_str(line).map_err(|e| {
-                EngineError::new(
-                    format!("podman JSON line: {}", e),
-                    "podman",
-                    vec![],
-                    None,
-                    e.to_string(),
-                )
-            })?;
-            if v.is_object() {
-                out.push(v);
+            match serde_json::from_str::<serde_json::Value>(line) {
+                // Object values are kept; everything else (arrays,
+                // numbers, strings, booleans, null) is silently dropped
+                // because the scanner only knows how to build a
+                // ``PrunableItem`` from a JSON object.
+                Ok(v) if v.is_object() => out.push(v),
+                Ok(_) => {}
+                Err(e) => warn!(
+                    "podman: dropping malformed JSON line ({}): {}",
+                    e, line
+                ),
             }
         }
-        Ok(out)
+        out
     }
 }
 
@@ -366,33 +396,41 @@ mod tests {
     #[test]
     fn parses_podman_json_array() {
         let out = r#"[{"Id":"a1","Names":["img"],"Size":"10 MB"}]"#;
-        let parsed = parse_json_maybe_array(out).unwrap();
+        let parsed = parse_json_maybe_array(out);
         assert_eq!(parsed.len(), 1);
     }
 
     #[test]
     fn parses_podman_json_lines() {
         let out = "{\"Id\":\"a1\"}\n{\"Id\":\"a2\"}\n";
-        let parsed = parse_json_maybe_array(out).unwrap();
+        let parsed = parse_json_maybe_array(out);
         assert_eq!(parsed.len(), 2);
     }
 
     #[test]
     fn parses_podman_empty() {
-        assert!(parse_json_maybe_array("").unwrap().is_empty());
+        assert!(parse_json_maybe_array("").is_empty());
     }
 
     #[test]
     fn parses_podman_whitespace_only() {
-        assert!(parse_json_maybe_array("   \n  \n").unwrap().is_empty());
+        assert!(parse_json_maybe_array("   \n  \n").is_empty());
     }
 
     #[test]
     fn parses_podman_skips_non_object_lines() {
         let out = "{\"Id\":\"a1\"}\n42\n\"str\"\n{\"Id\":\"a2\"}\n";
-        let parsed = parse_json_maybe_array(out).unwrap();
+        let parsed = parse_json_maybe_array(out);
         // Only the two object lines are kept; the integer and string
         // values are dropped.
         assert_eq!(parsed.len(), 2);
+    }
+
+    #[test]
+    fn parses_podman_skips_malformed_array() {
+        // A malformed array no longer aborts the call; we just get
+        // an empty list back (with a warn! log line).
+        let parsed = parse_json_maybe_array("[not json");
+        assert!(parsed.is_empty());
     }
 }

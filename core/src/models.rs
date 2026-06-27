@@ -12,6 +12,10 @@ pub enum Engine {
     Flatpak,
     Snap,
     Ollama,
+    NodeModules,
+    PythonVenv,
+    Tox,
+    Mypy,
 }
 
 impl Engine {
@@ -22,6 +26,10 @@ impl Engine {
             Engine::Flatpak => "flatpak",
             Engine::Snap => "snap",
             Engine::Ollama => "ollama",
+            Engine::NodeModules => "node_modules",
+            Engine::PythonVenv => "python_venv",
+            Engine::Tox => "tox",
+            Engine::Mypy => "mypy",
         }
     }
 
@@ -33,6 +41,10 @@ impl Engine {
             Engine::Flatpak => "Flatpak",
             Engine::Snap => "Snap",
             Engine::Ollama => "Ollama",
+            Engine::NodeModules => "Node Modules",
+            Engine::PythonVenv => "Python venv",
+            Engine::Tox => "Tox",
+            Engine::Mypy => "Mypy",
         }
     }
 }
@@ -50,6 +62,9 @@ pub enum Category {
     Runtime,
     Model,
     SnapRevision,
+    NodeModules,
+    PythonVenv,
+    DependencyCache,
     Other,
 }
 
@@ -65,6 +80,9 @@ impl Category {
             Category::Runtime => "runtime",
             Category::Model => "model",
             Category::SnapRevision => "snap_revision",
+            Category::NodeModules => "node_modules",
+            Category::PythonVenv => "python_venv",
+            Category::DependencyCache => "dependency_cache",
             Category::Other => "other",
         }
     }
@@ -73,15 +91,18 @@ impl Category {
     /// header (e.g. ``"Images"``, ``"Build caches"``).
     pub fn plural_label(&self) -> &'static str {
         match self {
-            Category::Image => "Images",
-            Category::Container => "Containers",
-            Category::Volume => "Volumes",
-            Category::Network => "Networks",
+            Category::Image => "Docker Images",
+            Category::Container => "Docker Containers",
+            Category::Volume => "Docker Volumes",
+            Category::Network => "Docker Networks",
             Category::BuildCache => "Build caches",
-            Category::App => "Apps",
-            Category::Runtime => "Runtimes",
-            Category::Model => "Models",
+            Category::App => "Flatpak Apps",
+            Category::Runtime => "Flatpak Runtimes",
+            Category::Model => "Ollama Models",
             Category::SnapRevision => "Snap revisions",
+            Category::NodeModules => "Node Modules",
+            Category::PythonVenv => "Python venvs",
+            Category::DependencyCache => "Dependency caches",
             Category::Other => "Other",
         }
     }

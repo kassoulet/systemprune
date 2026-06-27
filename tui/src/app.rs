@@ -199,7 +199,7 @@ impl App {
         } else {
             self.selected = all_keys;
         }
-        self.status = format!("Selected {} item(s).", self.selected.len());
+        self.status = self.selected_status();
         self.rebuild_display_rows();
     }
 
@@ -221,19 +221,19 @@ impl App {
             .map(|i| (i.source.clone(), i.id.clone()))
             .collect();
         if safe_keys.is_empty() {
-            self.status = format!("No safe items in {}.", cat.as_str());
+            self.status = format!("No safe items in {}.", cat.plural_label());
             return;
         }
         if safe_keys.is_subset(&self.selected) {
             for k in &safe_keys {
                 self.selected.remove(k);
             }
-            self.status = format!("Deselected all in {}.", cat.as_str());
+            self.status = format!("Deselected all in {}.", cat.plural_label());
         } else {
             for k in safe_keys {
                 self.selected.insert(k);
             }
-            self.status = format!("Selected all in {}.", cat.as_str());
+            self.status = self.selected_status();
         }
         self.rebuild_display_rows();
     }
@@ -252,7 +252,22 @@ impl App {
         if !self.selected.remove(&key) {
             self.selected.insert(key);
         }
+        self.status = self.selected_status();
         self.rebuild_display_rows();
+    }
+
+    fn selected_status(&self) -> String {
+        let count = self.selected.len();
+        if count == 0 {
+            return "No items selected.".to_string();
+        }
+        let total: u64 = self
+            .items
+            .iter()
+            .filter(|i| self.selected.contains(&(i.source.clone(), i.id.clone())))
+            .map(|i| i.size_bytes)
+            .sum();
+        format!("Selected {} item(s) ({}) total.", count, format_size(total as i64, true))
     }
 
     fn toggle_cursor_group(&mut self) {
@@ -404,7 +419,6 @@ fn draw_sidebar(f: &mut ratatui::Frame, app: &App, area: Rect) {
 fn draw_table(f: &mut ratatui::Frame, app: &mut App, area: Rect) {
     let header = Row::new(vec![
         Cell::from("\u{2713}"),
-        Cell::from("Source"),
         Cell::from("Category"),
         Cell::from("Status"),
         Cell::from("Size"),
@@ -434,14 +448,9 @@ fn draw_table(f: &mut ratatui::Frame, app: &mut App, area: Rect) {
                 } else {
                     format!("[{} safe]", safe_count)
                 };
-                let cat_label = category
-                    .as_str()
-                    .replace('_', " ")
-                    .to_string();
                 Row::new(vec![
                     Cell::from(arrow),
-                    Cell::from(""),
-                    Cell::from(format!("\u{2588} {}", cat_label)),
+                    Cell::from(format!("\u{2588} {}", category.plural_label())),
                     Cell::from(format!("{} items", count)),
                     Cell::from(format_size(*total_size as i64, true)),
                     Cell::from(hint),
@@ -464,8 +473,7 @@ fn draw_table(f: &mut ratatui::Frame, app: &mut App, area: Rect) {
                 };
                 Row::new(vec![
                     Cell::from(mark),
-                    Cell::from(item.source.clone()),
-                    Cell::from(item.category.as_str().to_string()),
+                    Cell::from(item.category.plural_label().to_string()),
                     Cell::from(item.status.as_str().to_string()),
                     Cell::from(format_size(item.size_bytes as i64, true)),
                     Cell::from(item.name.clone()),
@@ -476,7 +484,6 @@ fn draw_table(f: &mut ratatui::Frame, app: &mut App, area: Rect) {
 
     let widths = [
         Constraint::Length(3),
-        Constraint::Length(10),
         Constraint::Length(16),
         Constraint::Length(12),
         Constraint::Length(10),

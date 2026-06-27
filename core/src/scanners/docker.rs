@@ -8,6 +8,7 @@ use crate::size::parse_size;
 use async_trait::async_trait;
 use serde::Deserialize;
 use std::collections::BTreeMap;
+use tracing::warn;
 
 const TIMEOUT_SECS: u64 = 60;
 
@@ -138,15 +139,19 @@ impl DockerScanner {
             if line.is_empty() {
                 continue;
             }
-            let img: DockerImage = serde_json::from_str(line).map_err(|e| {
-                EngineError::new(
-                    format!("docker image JSON: {}", e),
-                    self.source(),
-                    vec![],
-                    None,
-                    e.to_string(),
-                )
-            })?;
+            let img: DockerImage = match serde_json::from_str(line) {
+                Ok(i) => i,
+                Err(e) => {
+                    // One malformed line must not abort the whole
+                    // scan; skip and continue so the user still sees
+                    // the well-formed entries.
+                    warn!(
+                        "docker: skipping malformed image JSON line ({}): {}",
+                        e, line
+                    );
+                    continue;
+                }
+            };
             if img.id.is_empty() {
                 continue;
             }
@@ -195,15 +200,16 @@ impl DockerScanner {
             if line.is_empty() {
                 continue;
             }
-            let c: DockerContainer = serde_json::from_str(line).map_err(|e| {
-                EngineError::new(
-                    format!("docker container JSON: {}", e),
-                    self.source(),
-                    vec![],
-                    None,
-                    e.to_string(),
-                )
-            })?;
+            let c: DockerContainer = match serde_json::from_str(line) {
+                Ok(c) => c,
+                Err(e) => {
+                    warn!(
+                        "docker: skipping malformed container JSON line ({}): {}",
+                        e, line
+                    );
+                    continue;
+                }
+            };
             if c.id.is_empty() {
                 continue;
             }
@@ -244,15 +250,16 @@ impl DockerScanner {
             if line.is_empty() {
                 continue;
             }
-            let v: DockerVolume = serde_json::from_str(line).map_err(|e| {
-                EngineError::new(
-                    format!("docker volume JSON: {}", e),
-                    self.source(),
-                    vec![],
-                    None,
-                    e.to_string(),
-                )
-            })?;
+            let v: DockerVolume = match serde_json::from_str(line) {
+                Ok(v) => v,
+                Err(e) => {
+                    warn!(
+                        "docker: skipping malformed volume JSON line ({}): {}",
+                        e, line
+                    );
+                    continue;
+                }
+            };
             if v.name.is_empty() {
                 continue;
             }
@@ -283,15 +290,16 @@ impl DockerScanner {
             if line.is_empty() {
                 continue;
             }
-            let n: DockerNetwork = serde_json::from_str(line).map_err(|e| {
-                EngineError::new(
-                    format!("docker network JSON: {}", e),
-                    self.source(),
-                    vec![],
-                    None,
-                    e.to_string(),
-                )
-            })?;
+            let n: DockerNetwork = match serde_json::from_str(line) {
+                Ok(n) => n,
+                Err(e) => {
+                    warn!(
+                        "docker: skipping malformed network JSON line ({}): {}",
+                        e, line
+                    );
+                    continue;
+                }
+            };
             if n.id.is_empty() || n.name.is_empty() {
                 continue;
             }

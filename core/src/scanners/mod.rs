@@ -3,9 +3,14 @@
 pub mod base;
 pub mod docker;
 pub mod flatpak;
+pub mod fs_scan;
+pub mod mypy;
+pub mod node_modules;
 pub mod ollama;
 pub mod podman;
+pub mod python_venv;
 pub mod snap;
+pub mod tox;
 
 use crate::errors::EngineError;
 use crate::models::{Engine, PrunableItem};
@@ -49,5 +54,9 @@ pub fn all_scanners() -> Vec<Arc<dyn Scanner>> {
         Arc::new(flatpak::FlatpakScanner::new()),
         Arc::new(snap::SnapScanner::new()),
         Arc::new(ollama::OllamaScanner::new()),
+        Arc::new(node_modules::NodeModulesScanner::new()),
+        Arc::new(python_venv::PythonVenvScanner::new()),
+        Arc::new(tox::ToxScanner::new()),
+        Arc::new(mypy::MypyScanner::new()),
     ]
 }

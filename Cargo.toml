@@ -30,6 +30,8 @@ ratatui = "0.27"
 crossterm = "0.28"
 gtk = { version = "0.8", package = "gtk4" }
 glib = "0.20"
+walkdir = "2"
+dirs = "5"
 
 [profile.release]
 codegen-units = 1
