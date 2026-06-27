@@ -15,7 +15,3 @@ fn main() -> glib::ExitCode {
     app.connect_activate(window::build_window);
     app.run_with_args::<&str>(&[])
 }
-
-pub fn run() -> glib::ExitCode {
-    main()
-}

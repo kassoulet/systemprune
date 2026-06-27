@@ -1,11 +1,9 @@
 //! Shared filesystem scanning utilities for directory-based scanners.
 
-use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 use walkdir::WalkDir;
 
 use crate::errors::EngineError;
-use crate::models::{Category, Engine, PrunableItem, Status};
 
 /// Compute the total size of a directory in bytes by walking its contents.
 pub fn dir_size(path: &Path) -> u64 {
@@ -64,32 +62,6 @@ pub fn find_dirs_with_marker(root: &Path, marker_file: &str) -> Vec<(PathBuf, u6
         }
     }
     results
-}
-
-/// Build a [`PrunableItem`] for a discovered directory.
-pub fn make_item(
-    path: PathBuf,
-    size_bytes: u64,
-    engine: Engine,
-    source: &'static str,
-    category: Category,
-) -> PrunableItem {
-    let name = path
-        .file_name()
-        .map(|n| n.to_string_lossy().into_owned())
-        .unwrap_or_else(|| path.display().to_string());
-    let mut extra = BTreeMap::new();
-    extra.insert("path".into(), path.display().to_string());
-    PrunableItem {
-        id: path.display().to_string(),
-        name,
-        engine,
-        source: source.to_string(),
-        category,
-        size_bytes,
-        status: Status::Unused,
-        extra,
-    }
 }
 
 /// Delete a directory tree.

@@ -8,7 +8,7 @@
 //!   * Status bar at the bottom
 
 use adw::prelude::*;
-use adw::{ActionRow, ExpanderRow, HeaderBar, PreferencesGroup};
+use adw::{ActionRow, ExpanderRow, HeaderBar, ToolbarView};
 use gtk::{
     Box as GtkBox, Button, CheckButton, Label, ListBox, Orientation,
     ScrolledWindow, Separator,
@@ -41,11 +41,15 @@ pub fn build_window(app: &adw::Application) {
     delete_button.set_tooltip_text(Some("Delete selected items"));
     header.pack_start(&rescan_button);
     header.pack_end(&delete_button);
-    window.set_titlebar(Some(&header));
+
+    // --- ToolbarView wraps header + content ---
+    let toolbar_view = ToolbarView::new();
+    toolbar_view.add_top_bar(&header);
 
     // --- Outer vertical box: body + status ---
     let outer = GtkBox::new(Orientation::Vertical, 0);
-    window.set_child(Some(&outer));
+    toolbar_view.set_content(Some(&outer));
+    window.set_content(Some(&toolbar_view));
 
     // --- Main horizontal split: engines + items ---
     let main_box = GtkBox::new(Orientation::Horizontal, 0);
@@ -131,9 +135,8 @@ struct State {
     busy: bool,
     /// True while populating widgets during a rebuild.
     rebuilding: bool,
-    /// Cached group summary labels so per-item toggle handlers can
-    /// update the "[sel/total]" display without a full rebuild.
-    group_summary_labels: BTreeMap<Category, Label>,
+    /// Reusable Tokio runtime for scan/delete operations.
+    runtime: tokio::runtime::Runtime,
     /// Cached per-category expander rows.
     group_expander_rows: BTreeMap<Category, ExpanderRow>,
     /// Per-item checkbox, keyed by `(source, id)`.
@@ -148,7 +151,10 @@ impl State {
             selected: HashSet::new(),
             busy: false,
             rebuilding: false,
-            group_summary_labels: BTreeMap::new(),
+            runtime: tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+                .expect("tokio runtime"),
             group_expander_rows: BTreeMap::new(),
             item_checkboxes: BTreeMap::new(),
         }
@@ -185,12 +191,8 @@ fn do_scan(
     status.set_text("Scanning\u{2026}");
 
     let result = {
-        let rt = tokio::runtime::Builder::new_current_thread()
-            .enable_all()
-            .build()
-            .expect("tokio runtime");
         let orch = state.borrow().orchestrator.clone();
-        rt.block_on(orch.scan_all())
+        state.borrow().runtime.block_on(orch.scan_all())
     };
     let count = result.items.len();
     {
@@ -230,15 +232,19 @@ fn do_delete(
         return;
     }
     state.borrow_mut().busy = true;
-    status.set_text(&format!("Deleting {} item(s)\u{2026}", to_delete.len()));
+    let total_size: i64 = to_delete.iter().map(|i| i.size_bytes as i64).sum();
+    status.set_text(&format!(
+        "Deleting {} item(s) ({})\u{2026}",
+        to_delete.len(),
+        format_size(total_size, true)
+    ));
 
     let results = {
-        let rt = tokio::runtime::Builder::new_current_thread()
-            .enable_all()
-            .build()
-            .expect("tokio runtime");
         let orch = state.borrow().orchestrator.clone();
-        rt.block_on(orch.delete_many(&to_delete, true))
+        state
+            .borrow()
+            .runtime
+            .block_on(orch.delete_many(&to_delete, true))
     };
     let ok = results.iter().filter(|r| r.success).count();
     let fail = results.len() - ok;
@@ -258,7 +264,13 @@ fn do_delete(
     }
     rebuild_groups(state, groups_box);
     refresh_engines(state, engines_list);
-    status.set_text(&format!("Deleted {}, failed {}.", ok, fail));
+    let freed: i64 = results.iter().filter(|r| r.success).map(|r| r.item.size_bytes as i64).sum();
+    status.set_text(&format!(
+        "Deleted {}, failed {}. Freed {}.",
+        ok,
+        fail,
+        format_size(freed, true)
+    ));
 }
 
 // ---------------------------------------------------------------------------
@@ -273,8 +285,8 @@ fn refresh_engines(state: &Rc<RefCell<State>>, engines_list: &ListBox) {
     for src in s.orchestrator.available_engines() {
         let count = s.items.iter().filter(|i| i.source == src).count();
         let row = ActionRow::builder()
-            .title(&src)
-            .subtitle(&format!("{} item(s)", count))
+            .title(escape_markup(&src))
+            .subtitle(format!("{} item(s)", count))
             .activatable(false)
             .build();
         engines_list.append(&row);
@@ -289,7 +301,6 @@ fn rebuild_groups(state: &Rc<RefCell<State>>, groups_box: &GtkBox) {
     }
     {
         let mut s = state.borrow_mut();
-        s.group_summary_labels.clear();
         s.group_expander_rows.clear();
         s.item_checkboxes.clear();
     }
@@ -306,59 +317,65 @@ fn append_group(
     cat: Category,
     items: &[PrunableItem],
 ) {
-    // --- PreferencesGroup for this category ---
-    let group = PreferencesGroup::new();
-    group.set_title(cat.plural_label());
-    group.set_description(Some(&format!(
-        "{} item{}",
-        items.len(),
-        if items.len() == 1 { "" } else { "s" }
-    )));
-
-    // --- Summary label and select-all button in the header suffix ---
-    let summary = Label::new(Some("[0/0]"));
-    summary.set_xalign(1.0);
-    let select_all_btn = Button::with_label("Select all");
-    select_all_btn.set_tooltip_text(Some("Toggle all safe-to-delete items in this group"));
-    {
-        let state = state.clone();
-        select_all_btn.connect_clicked(move |_| {
-            on_select_all_clicked(&state, cat);
-        });
-    }
-
+    let total_size: i64 = items.iter().map(|i| i.size_bytes as i64).sum();
+    let sel_size: i64 = items
+        .iter()
+        .filter(|i| {
+            i.is_safe_to_delete()
+                && state
+                    .borrow()
+                    .selected
+                    .contains(&(i.source.clone(), i.id.clone()))
+        })
+        .map(|i| i.size_bytes as i64)
+        .sum();
     // --- ExpanderRow for the group ---
     let expander_row = ExpanderRow::new();
     expander_row.set_title(cat.plural_label());
-    expander_row.set_subtitle(&format!(
-        "{} item{}",
-        items.len(),
-        if items.len() == 1 { "" } else { "s" }
-    ));
+    let subtitle = if sel_size > 0 {
+        format!(
+            "{} item{}, {} to delete",
+            items.len(),
+            if items.len() == 1 { "" } else { "s" },
+            format_size(sel_size, true)
+        )
+    } else {
+        format!(
+            "{} item{}, {}",
+            items.len(),
+            if items.len() == 1 { "" } else { "s" },
+            format_size(total_size, true)
+        )
+    };
+    expander_row.set_subtitle(&escape_markup(&subtitle));
+    expander_row.set_expanded(true);
 
     // --- Add items directly as rows of the ExpanderRow ---
     for item in items {
-        let row = make_item_row(state, item, cat);
+        let row = make_item_row(state, item);
         expander_row.add_row(&row);
     }
-    expander_row.set_expanded(true);
 
-    group.add(&expander_row);
-    groups_box.append(&group);
+    groups_box.append(&expander_row);
 
     // --- Cache widgets ---
     {
         let mut s = state.borrow_mut();
-        s.group_summary_labels.insert(cat, summary.clone());
         s.group_expander_rows.insert(cat, expander_row.clone());
     }
-    update_group_summary(state, cat);
+}
+
+fn escape_markup(s: &str) -> String {
+    s.replace('&', "&amp;")
+        .replace('<', "&lt;")
+        .replace('>', "&gt;")
+        .replace('\'', "&apos;")
+        .replace('"', "&quot;")
 }
 
 fn make_item_row(
     state: &Rc<RefCell<State>>,
     item: &PrunableItem,
-    cat: Category,
 ) -> ActionRow {
     let key = (item.source.clone(), item.id.clone());
     let initially_selected = {
@@ -375,7 +392,7 @@ fn make_item_row(
         let item_source = item.source.clone();
         let item_id = item.id.clone();
         checkbox.connect_toggled(move |cb| {
-            on_item_toggled(&state, cb.is_active(), &item_source, &item_id, cat);
+            on_item_toggled(&state, cb.is_active(), &item_source, &item_id);
         });
     }
 
@@ -392,40 +409,24 @@ fn make_item_row(
 
     // --- ActionRow ---
     let row = ActionRow::builder()
-        .title(&item.name)
-        .subtitle(&item.source)
+        .title(escape_markup(&item.name))
+        .subtitle(escape_markup(&item.source))
         .activatable(false)
         .build();
     row.add_prefix(&checkbox);
     row.add_suffix(&status_label);
     row.add_suffix(&size_label);
 
+    // --- Add tooltip with full path if available ---
+    if let Some(path) = item.extra.get("path") {
+        row.set_tooltip_text(Some(path));
+    } else if let Some(root) = item.extra.get("project_root") {
+        row.set_tooltip_text(Some(root));
+    }
+
     state.borrow_mut().item_checkboxes.insert(key, checkbox);
 
     row
-}
-
-fn update_group_summary(state: &Rc<RefCell<State>>, cat: Category) {
-    let s = state.borrow();
-    let label = match s.group_summary_labels.get(&cat) {
-        Some(l) => l,
-        None => return,
-    };
-    let in_group: Vec<&PrunableItem> =
-        s.items.iter().filter(|i| i.category == cat).collect();
-    let safe = in_group.iter().filter(|i| i.is_safe_to_delete()).count();
-    let sel = in_group
-        .iter()
-        .filter(|i| {
-            i.is_safe_to_delete()
-                && s.selected.contains(&(i.source.clone(), i.id.clone()))
-        })
-        .count();
-    if safe == 0 {
-        label.set_text("[0 safe]");
-    } else {
-        label.set_text(&format!("[{} / {}]", sel, safe));
-    }
 }
 
 // ---------------------------------------------------------------------------
@@ -437,67 +438,72 @@ fn on_item_toggled(
     active: bool,
     source: &str,
     id: &str,
-    cat: Category,
 ) {
     if state.borrow().rebuilding {
         return;
     }
     let key = (source.to_string(), id.to_string());
-    let mut s = state.borrow_mut();
-    let present_and_safe = s
+    // Find the category of this item before mutating state.
+    let category = state
+        .borrow()
         .items
         .iter()
-        .any(|i| i.source == source && i.id == id && i.is_safe_to_delete());
-    if !present_and_safe {
-        return;
-    }
-    if active {
-        s.selected.insert(key);
-    } else {
-        s.selected.remove(&key);
-    }
-    drop(s);
-    update_group_summary(state, cat);
-}
-
-fn on_select_all_clicked(state: &Rc<RefCell<State>>, cat: Category) {
-    let safe_keys: Vec<(String, String)> = {
-        let s = state.borrow();
-        s.items
-            .iter()
-            .filter(|i| i.category == cat && i.is_safe_to_delete())
-            .map(|i| (i.source.clone(), i.id.clone()))
-            .collect()
-    };
-    if safe_keys.is_empty() {
-        return;
-    }
-    let all_selected = {
-        let s = state.borrow();
-        safe_keys.iter().all(|k| s.selected.contains(k))
-    };
+        .find(|i| i.source == source && i.id == id)
+        .map(|i| i.category);
     {
         let mut s = state.borrow_mut();
-        if all_selected {
-            for k in &safe_keys {
-                s.selected.remove(k);
-            }
+        let present_and_safe = s
+            .items
+            .iter()
+            .any(|i| i.source == source && i.id == id && i.is_safe_to_delete());
+        if !present_and_safe {
+            return;
+        }
+        if active {
+            s.selected.insert(key);
         } else {
-            for k in &safe_keys {
-                s.selected.insert(k.clone());
-            }
+            s.selected.remove(&key);
         }
     }
-    {
+    // Update the ExpanderRow subtitle for this item's category.
+    if let Some(cat) = category {
+        update_group_subtitle(state, cat);
+    }
+}
+
+/// Recompute and set the subtitle for a category's ExpanderRow.
+fn update_group_subtitle(state: &Rc<RefCell<State>>, cat: Category) {
+    let (subtitle, expander) = {
         let s = state.borrow();
-        for k in &safe_keys {
-            if let Some(cb) = s.item_checkboxes.get(k) {
-                let should_be_active = s.selected.contains(k);
-                if cb.is_active() != should_be_active {
-                    cb.set_active(should_be_active);
-                }
-            }
-        }
+        let items: Vec<&PrunableItem> = s.items.iter().filter(|i| i.category == cat).collect();
+        let total_size: i64 = items.iter().map(|i| i.size_bytes as i64).sum();
+        let sel_size: i64 = items
+            .iter()
+            .filter(|i| {
+                i.is_safe_to_delete()
+                    && s.selected.contains(&(i.source.clone(), i.id.clone()))
+            })
+            .map(|i| i.size_bytes as i64)
+            .sum();
+        let text = if sel_size > 0 {
+            format!(
+                "{} item{}, {} to delete",
+                items.len(),
+                if items.len() == 1 { "" } else { "s" },
+                format_size(sel_size, true)
+            )
+        } else {
+            format!(
+                "{} item{}, {}",
+                items.len(),
+                if items.len() == 1 { "" } else { "s" },
+                format_size(total_size, true)
+            )
+        };
+        let expander = s.group_expander_rows.get(&cat).cloned();
+        (text, expander)
+    };
+    if let Some(e) = expander {
+        e.set_subtitle(&escape_markup(&subtitle));
     }
-    update_group_summary(state, cat);
 }

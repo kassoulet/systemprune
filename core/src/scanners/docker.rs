@@ -240,6 +240,8 @@ impl DockerScanner {
     }
 
     async fn list_volumes(&self) -> Result<Vec<PrunableItem>, EngineError> {
+        // Get volume sizes from `docker system df -v`.
+        let volume_sizes = self.volume_size_map().await;
         let (out, _) = self
             .base
             .run(&["docker", "volume", "ls", "--format", "{{json .}}"], TIMEOUT_SECS)
@@ -263,6 +265,7 @@ impl DockerScanner {
             if v.name.is_empty() {
                 continue;
             }
+            let size_bytes = volume_sizes.get(&v.name).copied().unwrap_or(0);
             let mut extra = BTreeMap::new();
             extra.insert("driver".into(), v.driver);
             items.push(PrunableItem {
@@ -271,12 +274,57 @@ impl DockerScanner {
                 engine: Engine::Docker,
                 source: self.source().to_string(),
                 category: Category::Volume,
-                size_bytes: 0,
+                size_bytes,
                 status: Status::Unused,
                 extra,
             });
         }
         Ok(items)
+    }
+
+    /// Parse `docker system df -v` to get per-volume sizes.
+    async fn volume_size_map(&self) -> BTreeMap<String, u64> {
+        let Ok((out, _)) = self
+            .base
+            .run(&["docker", "system", "df", "-v"], TIMEOUT_SECS)
+            .await
+        else {
+            return BTreeMap::new();
+        };
+        let mut map = BTreeMap::new();
+        let mut in_volumes_section = false;
+        for line in out.lines() {
+            let line = line.trim();
+            if line.is_empty() {
+                continue;
+            }
+            // Detect the "Local Volumes:" or "VOLUME NAME" header.
+            if line.contains("VOLUME NAME") || line.starts_with("Local Volumes") {
+                in_volumes_section = true;
+                continue;
+            }
+            // Stop if we hit the next section (Build Cache, etc.).
+            if in_volumes_section && (line.starts_with("Build Cache") || line.starts_with("Images") || line.starts_with("Containers")) {
+                in_volumes_section = false;
+                continue;
+            }
+            if !in_volumes_section {
+                continue;
+            }
+            // Parse line: "volume_name    links    size"
+            // Use 2+ whitespace as separator.
+            let parts: Vec<&str> = line.split_whitespace().collect();
+            if parts.len() >= 3 {
+                let name = parts[0].to_string();
+                // Size is the last column.
+                let size_str = parts.last().unwrap_or(&"0");
+                let size = parse_size(size_str);
+                if !name.is_empty() && size > 0 {
+                    map.insert(name, size);
+                }
+            }
+        }
+        map
     }
 
     async fn list_networks(&self) -> Result<Vec<PrunableItem>, EngineError> {

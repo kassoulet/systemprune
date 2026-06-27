@@ -37,16 +37,11 @@ enum DisplayRow {
         count: usize,
         total_size: u64,
         sel_count: usize,
+        sel_size: u64,
         safe_count: usize,
         collapsed: bool,
     },
     Item(usize),
-}
-
-impl DisplayRow {
-    fn is_group(&self) -> bool {
-        matches!(self, DisplayRow::Group { .. })
-    }
 }
 
 struct App {
@@ -62,6 +57,8 @@ struct App {
     display_rows: Vec<DisplayRow>,
     /// Cached sidebar area for hit testing.
     sidebar_area: Rect,
+    /// Set to true when the user presses q/Esc to quit.
+    quit: bool,
 }
 
 impl App {
@@ -76,6 +73,7 @@ impl App {
             collapsed: HashSet::new(),
             display_rows: Vec::new(),
             sidebar_area: Rect::default(),
+            quit: false,
         }
     }
 
@@ -109,12 +107,22 @@ impl App {
                         && self.selected.contains(&(it.source.clone(), it.id.clone()))
                 })
                 .count();
+            let sel_size: u64 = indices
+                .iter()
+                .filter(|&&i| {
+                    let it = &self.items[i];
+                    it.is_safe_to_delete()
+                        && self.selected.contains(&(it.source.clone(), it.id.clone()))
+                })
+                .map(|&i| self.items[i].size_bytes)
+                .sum();
             let collapsed = self.collapsed.contains(&cat);
             self.display_rows.push(DisplayRow::Group {
                 category: cat,
                 count,
                 total_size,
                 sel_count,
+                sel_size,
                 safe_count,
                 collapsed,
             });
@@ -157,7 +165,7 @@ impl App {
         // select-all-in-group; lowercase `a` toggles select-all-flat.
         let shift = key.modifiers.contains(KeyModifiers::SHIFT);
         match key.code {
-            KeyCode::Char('q') | KeyCode::Esc => std::process::exit(0),
+            KeyCode::Char('q') | KeyCode::Esc => self.quit = true,
             KeyCode::Char('r') => {
                 if !self.busy {
                     self.busy = true;
@@ -173,7 +181,17 @@ impl App {
                     return;
                 }
                 self.busy = true;
-                self.status = format!("Deleting {} item(s)\u{2026}", self.selected.len());
+                let total: u64 = self
+                    .items
+                    .iter()
+                    .filter(|i| self.selected.contains(&(i.source.clone(), i.id.clone())))
+                    .map(|i| i.size_bytes)
+                    .sum();
+                self.status = format!(
+                    "Deleting {} item(s) ({})\u{2026}",
+                    self.selected.len(),
+                    format_size(total as i64, true)
+                );
             }
             KeyCode::Down => {
                 if self.display_rows.is_empty() {
@@ -182,10 +200,12 @@ impl App {
                 let max = self.display_rows.len() - 1;
                 let i = self.table_state.selected().unwrap_or(0);
                 self.table_state.select(Some((i + 1).min(max)));
+                self.update_cursor_status();
             }
             KeyCode::Up => {
                 let i = self.table_state.selected().unwrap_or(0);
                 self.table_state.select(Some(i.saturating_sub(1)));
+                self.update_cursor_status();
             }
             _ => {}
         }
@@ -194,6 +214,23 @@ impl App {
     fn cursor_row(&self) -> Option<&DisplayRow> {
         let i = self.table_state.selected()?;
         self.display_rows.get(i)
+    }
+
+    fn update_cursor_status(&mut self) {
+        match self.cursor_row() {
+            Some(DisplayRow::Item(idx)) => {
+                let item = &self.items[*idx];
+                if let Some(path) = item.extra.get("path") {
+                    self.status = path.clone();
+                } else if let Some(root) = item.extra.get("project_root") {
+                    self.status = format!("{} ({})", item.name, root);
+                }
+            }
+            Some(DisplayRow::Group { category, count, .. }) => {
+                self.status = format!("{} \u{2014} {} item(s)", category.plural_label(), count);
+            }
+            None => {}
+        }
     }
 
     fn toggle_all_flat(&mut self) {
@@ -375,7 +412,8 @@ impl App {
                 .iter()
                 .any(|r| r.success && r.item.source == i.source && r.item.id == i.id)
         });
-        self.status = format!("Deleted {}, failed {}.", ok, fail);
+        let freed: u64 = results.iter().filter(|r| r.success).map(|r| r.item.size_bytes).sum();
+        self.status = format!("Deleted {}, failed {}. Freed {}.", ok, fail, format_size(freed as i64, true));
         self.busy = false;
         self.rebuild_display_rows();
     }
@@ -399,6 +437,9 @@ pub fn run(terminal: &mut TerminalType) -> Result<()> {
                 _ => {}
             }
         }
+        if app.quit {
+            break;
+        }
         if app.busy {
             if app.status.starts_with("Scanning") {
                 runtime.block_on(async {
@@ -412,6 +453,7 @@ pub fn run(terminal: &mut TerminalType) -> Result<()> {
         }
         app.render(terminal)?;
     }
+    Ok(())
 }
 
 // ---------------------------------------------------------------------------
@@ -475,12 +517,20 @@ fn draw_table(f: &mut ratatui::Frame, app: &mut App, area: Rect) {
                 count,
                 total_size,
                 sel_count,
+                sel_size,
                 safe_count,
                 collapsed,
             } => {
                 let arrow = if *collapsed { "\u{25b8}" } else { "\u{25be}" };
-                let hint = if *safe_count > 0 {
-                    format!("[\u{2588}{}/\u{2588}{}]  A=all  Enter=toggle", sel_count, safe_count)
+                let hint = if *sel_count > 0 {
+                    format!(
+                        "[{}/{} sel, {}]  A=all  Enter=toggle",
+                        sel_count,
+                        safe_count,
+                        format_size(*sel_size as i64, true)
+                    )
+                } else if *safe_count > 0 {
+                    format!("[{} safe]  A=all  Enter=toggle", safe_count)
                 } else {
                     format!("[{} safe]", safe_count)
                 };

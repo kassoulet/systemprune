@@ -92,15 +92,15 @@ async fn main() -> ExitCode {
             }
             let max_name = items.iter().map(|i| i.name.len()).max().unwrap_or(4).clamp(16, 60);
             println!(
-                "{:<10} {:<14} {:<10} {:>10}  {}",
-                "SOURCE", "CATEGORY", "STATUS", "SIZE", "NAME"
+                "{:<10} {:<14} {:<10} {:>10}  NAME",
+                "SOURCE", "CATEGORY", "STATUS", "SIZE"
             );
             println!("{}", "-".repeat(64));
             for item in &items {
-                let name = if item.name.len() > max_name {
-                    &item.name[..max_name]
+                let name: String = if item.name.len() > max_name {
+                    item.name.chars().take(max_name).collect()
                 } else {
-                    &item.name
+                    item.name.clone()
                 };
                 println!(
                     "{:<10} {:<14} {:<10} {:>10}  {}",

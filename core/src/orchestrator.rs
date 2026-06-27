@@ -33,7 +33,6 @@ impl ScanResult {
     /// categories; the inner vec preserves first-seen order of
     /// items within each category.
     pub fn by_category(&self) -> Vec<(crate::models::Category, Vec<PrunableItem>)> {
-        use std::collections::BTreeMap;
         let mut order: Vec<crate::models::Category> = Vec::new();
         let mut buckets: BTreeMap<crate::models::Category, Vec<PrunableItem>> =
             BTreeMap::new();

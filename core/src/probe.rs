@@ -23,7 +23,7 @@ pub fn which(binary: &str) -> Option<PathBuf> {
     // Consult ``which`` crate first to honour ``PATHEXT`` etc. on
     // non-Unix systems. The function still consults ``$PATH`` directly
     // when needed.
-    if let Some(p) = which::which(binary).ok() {
+    if let Ok(p) = which::which(binary) {
         return Some(p);
     }
     manual_search(binary, &current_path())

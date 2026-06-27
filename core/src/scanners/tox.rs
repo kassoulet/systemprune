@@ -3,11 +3,12 @@
 //! `.tox` folders are created by the `tox` test automation tool and
 //! can grow large over time.
 
-use super::fs_scan::{delete_dir, find_dirs_named, home, make_item};
+use super::fs_scan::{delete_dir, find_dirs_named, home};
 use super::Scanner;
 use crate::errors::EngineError;
-use crate::models::{Category, Engine, PrunableItem};
+use crate::models::{Category, Engine, PrunableItem, Status};
 use async_trait::async_trait;
+use std::collections::BTreeMap;
 
 const SOURCE: &str = "tox";
 
@@ -47,7 +48,23 @@ impl Scanner for ToxScanner {
         let items = found
             .into_iter()
             .map(|(path, size)| {
-                make_item(path, size, Engine::Tox, SOURCE, Category::DependencyCache)
+                let parent = path.parent().unwrap_or(&path);
+                let parent_name = parent
+                    .file_name()
+                    .map(|n| n.to_string_lossy().into_owned())
+                    .unwrap_or_else(|| path.display().to_string());
+                let mut extra = BTreeMap::new();
+                extra.insert("path".into(), path.display().to_string());
+                PrunableItem {
+                    id: path.display().to_string(),
+                    name: parent_name,
+                    engine: Engine::Tox,
+                    source: SOURCE.to_string(),
+                    category: Category::DependencyCache,
+                    size_bytes: size,
+                    status: Status::Unused,
+                    extra,
+                }
             })
             .collect();
         Ok(items)

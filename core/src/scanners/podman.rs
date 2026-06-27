@@ -120,6 +120,10 @@ impl Scanner for PodmanScanner {
 impl PodmanScanner {
     async fn list_images(&self) -> Result<Vec<PrunableItem>, EngineError> {
         let active = self.active_container_image_ids().await;
+        // Podman may return short (12-char) or long (sha256:...) IDs.
+        // Normalise to first 12 hex chars for consistent comparison.
+        let active_short: std::collections::HashSet<String> =
+            active.iter().map(|id| short_image_id(id)).collect();
         let (out, _) = self
             .base
             .run(&["podman", "images", "-a", "--format", "json"], TIMEOUT_SECS)
@@ -150,7 +154,7 @@ impl PodmanScanner {
                 img.tag.clone()
             };
             let is_dangling = (repo == "<none>" || repo.is_empty()) && tag == "<none>";
-            let in_use = active.contains(&img.id);
+            let in_use = active_short.contains(&short_image_id(&img.id));
             let status = if in_use {
                 Status::Active
             } else if is_dangling {
@@ -337,6 +341,14 @@ impl PodmanScanner {
         }
         set
     }
+}
+
+/// Normalise a Podman image id for set membership comparison.
+/// Strips the ``sha256:`` prefix and truncates to 12 characters so
+/// that short and long forms of the same id compare equal.
+fn short_image_id(id: &str) -> String {
+    let stripped = id.strip_prefix("sha256:").unwrap_or(id);
+    stripped.chars().take(12).collect()
 }
 
 /// Podman emits either a JSON array or line-delimited JSON. Handle both.
