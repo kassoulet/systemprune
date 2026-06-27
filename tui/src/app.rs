@@ -25,6 +25,7 @@ use systemprune_core::models::{Category, PrunableItem, Status};
 use systemprune_core::orchestrator::Orchestrator;
 use systemprune_core::scanners::all_scanners;
 use systemprune_core::size::format_size;
+use systemprune_core::sort::SortMode;
 
 type TerminalType = ratatui::Terminal<ratatui::backend::CrosstermBackend<Stdout>>;
 
@@ -79,6 +80,9 @@ struct App {
     quit: bool,
     /// Error messages for failed deletions, keyed by (source, id).
     delete_errors: BTreeMap<(String, String), String>,
+    /// Active sort mode for items within each category group.
+    /// Cycled by the `s` key binding.
+    sort_mode: SortMode,
 }
 
 impl App {
@@ -95,6 +99,7 @@ impl App {
             sidebar_area: Rect::default(),
             quit: false,
             delete_errors: BTreeMap::new(),
+            sort_mode: SortMode::Default,
         }
     }
 
@@ -138,7 +143,13 @@ impl App {
     }
 
     /// Rebuild the flat list of display rows from `items`, applying
-    /// current selection and collapse state.
+    /// current selection, collapse, and sort state.
+    ///
+    /// **Sort scope.**  Items are sorted **within** each category
+    /// group only; the cross-category order still follows the
+    /// first-seen order of the scan.  `SortMode::Default` is a
+    /// no-op so the default UX is identical to the pre-sort
+    /// behaviour.
     fn rebuild_display_rows(&mut self) {
         self.display_rows.clear();
         // Group by category, preserving first-seen order, using a
@@ -152,7 +163,36 @@ impl App {
             buckets.entry(item.category).or_default().push(idx);
         }
         for cat in order {
-            let indices = &buckets[&cat];
+            // Sort the per-category indices by the active mode.
+            // We sort indices (not items) so the rest of the
+            // method can keep indexing into `self.items` without
+            // remapping.  `Default` is a no-op.
+            // Borrow-checker note: we can't hold a mutable
+            // borrow of `buckets[cat]` while the `sort_by`
+            // closure reads `self.items`, because both are
+            // fields of `self`.  We therefore `remove` the
+            // bucket, sort it in place (which only reads
+            // `self.items` and `self.sort_mode`), and insert
+            // it back at the end of the loop after all the
+            // read-only passes that use `indices`.
+            let mut indices = buckets.remove(&cat).unwrap_or_default();
+            let items = &self.items;
+            match self.sort_mode {
+                SortMode::Default => {}
+                SortMode::NameAsc => {
+                    indices.sort_by(|&a, &b| items[a].name.cmp(&items[b].name));
+                }
+                SortMode::SizeDesc => {
+                    indices.sort_by(|&a, &b| {
+                        items[b].size_bytes.cmp(&items[a].size_bytes)
+                    });
+                }
+                SortMode::SizeAsc => {
+                    indices.sort_by(|&a, &b| {
+                        items[a].size_bytes.cmp(&items[b].size_bytes)
+                    });
+                }
+            }
             let count = indices.len();
             let total_size: u64 = indices.iter().map(|&i| self.items[i].size_bytes).sum();
             let safe_count = indices
@@ -187,10 +227,14 @@ impl App {
                 collapsed,
             });
             if !collapsed {
-                for &i in indices {
+                for &i in indices.iter() {
                     self.display_rows.push(DisplayRow::Item(i));
                 }
             }
+            // Put the sorted bucket back.  Done last so all the
+            // read-only passes above can use `indices` without
+            // re-borrowing `buckets`.
+            buckets.insert(cat, indices);
         }
     }
 
@@ -231,6 +275,17 @@ impl App {
                     self.busy = true;
                     self.status = "Scanning\u{2026}".to_string();
                 }
+            }
+            KeyCode::Char('s') => {
+                // Cycle through sort modes.  No shift variant
+                // for now; a future menu-driven picker could
+                // bind `S` to one.
+                self.sort_mode = self.sort_mode.next();
+                self.rebuild_display_rows();
+                self.status = format!(
+                    "Sort: {} (press s again to change)",
+                    self.sort_mode.label()
+                );
             }
             KeyCode::Char('a') if shift => self.toggle_select_all_at_cursor(),
             KeyCode::Char('a') => self.toggle_all_flat(),
@@ -557,7 +612,7 @@ fn draw_header(f: &mut ratatui::Frame, area: Rect) {
                 .fg(Color::Cyan)
                 .add_modifier(Modifier::BOLD),
         ),
-        Span::raw("Unified Linux disk cleaner"),
+        Span::raw("  s=sort  a=select all  d=delete  r=rescan  q=quit"),
     ])])
     .block(Block::default().borders(Borders::BOTTOM));
     f.render_widget(header, area);
@@ -669,13 +724,14 @@ fn draw_table(f: &mut ratatui::Frame, app: &mut App, area: Rect) {
         .map(|i| i.size_bytes)
         .sum();
     let title = if app.selected.is_empty() {
-        "Items".to_string()
+        format!("Items  [sort: {}]", app.sort_mode.short_label())
     } else {
         format!(
-            "Items  [{}/{} selected, {}]",
+            "Items  [{}/{} selected, {} | sort: {}]",
             app.selected.len(),
             app.items.len(),
-            format_size(sel_total as i64, true)
+            format_size(sel_total as i64, true),
+            app.sort_mode.short_label()
         )
     };
     let table = Table::new(rows, widths)
@@ -740,6 +796,7 @@ mod tests {
             sidebar_area: Rect::default(),
             quit: false,
             delete_errors: BTreeMap::new(),
+            sort_mode: SortMode::Default,
         }
     }
 

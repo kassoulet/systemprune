@@ -18,6 +18,7 @@ pub mod orchestrator;
 pub mod probe;
 pub mod scanners;
 pub mod size;
+pub mod sort;
 
 pub use errors::{EngineError, ParseError, SystemPruneError};
 pub use models::{Category, Engine, PrunableItem, Status};
@@ -25,6 +26,7 @@ pub use orchestrator::{DeleteResult, Orchestrator, ScanResult};
 pub use probe::{probe_engines, which};
 pub use scanners::Scanner;
 pub use size::{format_size, parse_size};
+pub use sort::{sort_items, sorted_items, SortMode};
 
 /// Library version (mirrors the workspace version).
 pub const VERSION: &str = env!("CARGO_PKG_VERSION");

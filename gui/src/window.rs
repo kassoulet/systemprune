@@ -10,8 +10,8 @@
 use adw::prelude::*;
 use adw::{ActionRow, ExpanderRow, HeaderBar, ToolbarView};
 use gtk::{
-    gio, Box as GtkBox, Button, CheckButton, Label, MenuButton,
-    Orientation, ScrolledWindow, Separator,
+    gio, Box as GtkBox, Button, CheckButton, DropDown, Label, MenuButton,
+    Orientation, ScrolledWindow, Separator, StringList,
 };
 use std::cell::RefCell;
 use std::collections::{BTreeMap, HashSet};
@@ -20,6 +20,7 @@ use systemprune_core::models::{Category, PrunableItem};
 use systemprune_core::orchestrator::Orchestrator;
 use systemprune_core::scanners::all_scanners;
 use systemprune_core::size::format_size;
+use systemprune_core::sort::{sort_items, SortMode};
 
 /// Build and present the main application window.
 pub fn build_window(app: &adw::Application) {
@@ -41,6 +42,33 @@ pub fn build_window(app: &adw::Application) {
     delete_button.set_tooltip_text(Some("Delete selected items"));
     header.pack_start(&rescan_button);
     header.pack_end(&delete_button);
+
+    // --- Sort dropdown ---
+    // Built from a `StringList` model whose entries mirror
+    // `SortMode::all()` in cycle order.  The dropdown's
+    // `selected` index is mapped back to a `SortMode` in the
+    // `notify::selected` handler.  We pack it to the end of
+    // the header bar (before the hamburger menu) so the
+    // visual order is: [Rescan] ... [Delete] [Sort] [Menu].
+    //
+    // **Scope note.**  The handler captures `groups_box` by
+    // clone, but `groups_box` is defined further down in
+    // `build_window` (after the header bar is assembled).  We
+    // therefore create the dropdown and pack it into the
+    // header here, but defer the signal connection until
+    // after `groups_box` exists.
+    let sort_model = StringList::new(&[]);
+    for mode in SortMode::all() {
+        sort_model.append(mode.label());
+    }
+    let sort_dropdown = DropDown::new(Some(sort_model), None::<&gtk::Expression>);
+    sort_dropdown.set_selected(0); // Default
+    sort_dropdown.set_tooltip_text(Some("Sort items within each group"));
+    // Pin a minimum width so the header layout doesn't jitter
+    // when the selection changes (the longest label, "Size
+    // (largest first)", is ~20 chars at default font).
+    sort_dropdown.set_size_request(180, -1);
+    header.pack_end(&sort_dropdown);
 
     // --- Hamburger menu (About, etc.) ---
     // Built with a `gio::Menu` model and a `MenuButton` so the
@@ -95,6 +123,21 @@ pub fn build_window(app: &adw::Application) {
         let groups_box = groups_box.clone();
         rescan_button.connect_clicked(move |_| {
             do_scan(&state, &status_label, &groups_box);
+        });
+    }
+    // --- Wire up the sort dropdown (deferred so `groups_box`
+    //     is in scope). ---
+    {
+        let state = state.clone();
+        let groups_box = groups_box.clone();
+        sort_dropdown.connect_selected_notify(move |dd| {
+            let idx = dd.selected() as usize;
+            let mode = SortMode::all()
+                .get(idx)
+                .copied()
+                .unwrap_or(SortMode::Default);
+            state.borrow_mut().sort_mode = mode;
+            rebuild_groups(&state, &groups_box);
         });
     }
     {
@@ -225,6 +268,9 @@ struct State {
     /// the front instead of stacking new ones.  Built lazily on
     /// first activation; the inner `Option` is `None` until then.
     about_window: Rc<RefCell<Option<adw::AboutWindow>>>,
+    /// Active sort mode for items within each category group.
+    /// Set by the header-bar sort dropdown.
+    sort_mode: SortMode,
 }
 
 impl State {
@@ -244,10 +290,17 @@ impl State {
             group_toggle_buttons: BTreeMap::new(),
             delete_errors: BTreeMap::new(),
             about_window: Rc::new(RefCell::new(None)),
+            sort_mode: SortMode::Default,
         }
     }
 
     /// Items grouped by category, preserving first-seen order.
+    /// Items within each group are sorted by `self.sort_mode`.
+    ///
+    /// **Sort scope.**  The cross-category order is unchanged
+    /// (first-seen from the scan); only the per-group order is
+    /// affected.  `SortMode::Default` is a no-op so the default
+    /// UX is identical to the pre-sort behaviour.
     fn grouped(&self) -> Vec<(Category, Vec<PrunableItem>)> {
         let mut order: Vec<Category> = Vec::new();
         let mut buckets: BTreeMap<Category, Vec<PrunableItem>> = BTreeMap::new();
@@ -256,6 +309,9 @@ impl State {
                 order.push(item.category);
             }
             buckets.entry(item.category).or_default().push(item.clone());
+        }
+        for items in buckets.values_mut() {
+            sort_items(items, self.sort_mode);
         }
         order.into_iter().map(|c| (c, buckets[&c].clone())).collect()
     }
