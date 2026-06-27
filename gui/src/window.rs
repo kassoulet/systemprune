@@ -10,7 +10,7 @@
 use adw::prelude::*;
 use adw::{ActionRow, ExpanderRow, HeaderBar, ToolbarView};
 use gtk::{
-    gio, Box as GtkBox, Button, CheckButton, Label, ListBox, MenuButton,
+    gio, Box as GtkBox, Button, CheckButton, Label, MenuButton,
     Orientation, ScrolledWindow, Separator,
 };
 use std::cell::RefCell;
@@ -64,28 +64,13 @@ pub fn build_window(app: &adw::Application) {
     toolbar_view.set_content(Some(&outer));
     window.set_content(Some(&toolbar_view));
 
-    // --- Main horizontal split: engines + items ---
-    let main_box = GtkBox::new(Orientation::Horizontal, 0);
+    // --- Main content area: items grouped by category ---
+    let main_box = GtkBox::new(Orientation::Vertical, 0);
     main_box.set_vexpand(true);
     main_box.set_hexpand(true);
     outer.append(&main_box);
 
-    // --- Engines sidebar (left) ---
-    let engines_scroll = ScrolledWindow::new();
-    engines_scroll.set_size_request(200, -1);
-    engines_scroll.set_hscrollbar_policy(gtk::PolicyType::Never);
-    engines_scroll.set_vscrollbar_policy(gtk::PolicyType::Automatic);
-    let engines_list = ListBox::new();
-    engines_list.set_selection_mode(gtk::SelectionMode::Single);
-    engines_list.set_css_classes(&["navigation-sidebar"]);
-    engines_scroll.set_child(Some(&engines_list));
-    main_box.append(&engines_scroll);
-
-    // --- Separator between sidebar and content ---
-    let vsep = Separator::new(Orientation::Vertical);
-    main_box.append(&vsep);
-
-    // --- Groups list (right): one expander row per category ---
+    // --- Groups list: one expander row per category ---
     let items_scroll = ScrolledWindow::new();
     items_scroll.set_hexpand(true);
     items_scroll.set_vexpand(true);
@@ -107,19 +92,17 @@ pub fn build_window(app: &adw::Application) {
     {
         let state = state.clone();
         let status_label = status.clone();
-        let engines_list = engines_list.clone();
         let groups_box = groups_box.clone();
         rescan_button.connect_clicked(move |_| {
-            do_scan(&state, &status_label, &engines_list, &groups_box);
+            do_scan(&state, &status_label, &groups_box);
         });
     }
     {
         let state = state.clone();
         let status_label = status.clone();
-        let engines_list = engines_list.clone();
         let groups_box = groups_box.clone();
         delete_button.connect_clicked(move |_| {
-            do_delete(&state, &status_label, &engines_list, &groups_box);
+            do_delete(&state, &status_label, &groups_box);
         });
     }
 
@@ -127,10 +110,9 @@ pub fn build_window(app: &adw::Application) {
     {
         let state = state.clone();
         let status_label = status.clone();
-        let engines_list = engines_list.clone();
         let groups_box = groups_box.clone();
         window.connect_show(move |_| {
-            do_scan(&state, &status_label, &engines_list, &groups_box);
+            do_scan(&state, &status_label, &groups_box);
         });
     }
 
@@ -318,8 +300,7 @@ impl State {
 // `state.borrow()` scope is wrapped in `with_rebuilding`.  The
 // current call sites are: `set_active` in `make_item_row`,
 // `set_active` in `on_group_toggle_clicked`, the whole rebuild
-// in `rebuild_groups`, the `engines_list.append` loop in
-// `refresh_engines`, and the `set_label` / `set_sensitive`
+// in `rebuild_groups`, and the `set_label` / `set_sensitive`
 // calls in `update_group_toggle_button`.  Future signal-firing
 // call sites inside a `state.borrow()` scope should follow the
 // same pattern.
@@ -459,7 +440,6 @@ where
 fn do_scan(
     state: &Rc<RefCell<State>>,
     status: &Label,
-    engines_list: &ListBox,
     groups_box: &GtkBox,
 ) {
     if state.borrow().busy {
@@ -479,14 +459,12 @@ fn do_scan(
         s.busy = false;
     }
     rebuild_groups(state, groups_box);
-    refresh_engines(state, engines_list);
     status.set_text(&format!("Found {} item(s).", count));
 }
 
 fn do_delete(
     state: &Rc<RefCell<State>>,
     status: &Label,
-    engines_list: &ListBox,
     groups_box: &GtkBox,
 ) {
     if state.borrow().busy {
@@ -587,7 +565,6 @@ fn do_delete(
         s.busy = false;
     }
     rebuild_groups(state, groups_box);
-    refresh_engines(state, engines_list);
     let freed: i64 = results.iter().filter(|r| r.success).map(|r| r.item.size_bytes as i64).sum();
 
     // Final status: standard "Deleted N, failed M. Freed X." plus an
@@ -616,45 +593,6 @@ fn do_delete(
 // ---------------------------------------------------------------------------
 // UI helpers
 // ---------------------------------------------------------------------------
-
-fn refresh_engines(state: &Rc<RefCell<State>>, engines_list: &ListBox) {
-    while let Some(row) = engines_list.row_at_index(0) {
-        engines_list.remove(&row);
-    }
-    // Extract the per-source counts into a local `Vec` **before**
-    // any GTK work, so the state borrow is released before we
-    // fire signals.  This is the same "extract state-derived
-    // values into local variables" step from the safe
-    // signal-firing pattern (see `with_rebuilding` doc comment).
-    let per_source_count: Vec<(String, usize)> = {
-        let s = state.borrow();
-        s.orchestrator
-            .available_engines()
-            .into_iter()
-            .map(|src| {
-                let count = s.items.iter().filter(|i| i.source == src).count();
-                (src, count)
-            })
-            .collect()
-    };
-    // Wrap the signal-firing loop in `with_rebuilding` so any
-    // future signal handler that re-enters state (e.g. a
-    // `row-inserted` handler on `engines_list`) sees the flag
-    // and bails out of its own `state.borrow()`.  Today no
-    // such handler is connected, so the wrap is purely
-    // defensive — the audit conclusion is "every signal-firing
-    // call site inside a state-borrow scope is wrapped".
-    with_rebuilding(state, || {
-        for (src, count) in &per_source_count {
-            let row = ActionRow::builder()
-                .title(escape_markup(src))
-                .subtitle(format!("{} item(s)", count))
-                .activatable(false)
-                .build();
-            engines_list.append(&row);
-        }
-    });
-}
 
 fn rebuild_groups(state: &Rc<RefCell<State>>, groups_box: &GtkBox) {
     // Wrap the whole rebuild in `with_rebuilding` so:
@@ -1606,53 +1544,6 @@ mod tests {
             s.item_checkboxes
                 .contains_key(&("docker".to_string(), "a".to_string())),
             "make_item_row should register the new checkbox in state.item_checkboxes"
-        );
-    }
-
-    /// Regression test that pins the "`refresh_engines` must never
-    /// panic" contract enforced by the defensive `with_rebuilding`
-    /// wrap around the `engines_list.append(&row)` loop.
-    ///
-    /// The original `refresh_engines` held a `Ref<State>` (from
-    /// `state.borrow()`) across each `engines_list.append` call,
-    /// which fires the `row-inserted` signal synchronously.  Today
-    /// no `row-inserted` handler is connected, so the borrow
-    /// doesn't conflict.  But a future contributor who adds a
-    /// handler that calls `state.borrow()` or `state.borrow_mut()`
-    /// would hit "RefCell already mutably borrowed" without the
-    /// guard.  This test exercises the full function on a minimal
-    /// state and verifies it returns without panicking.
-    ///
-    /// Marked `#[ignore]` because GTK widget creation needs a
-    /// display server (X11 / Wayland / Xvfb).  Run manually with:
-    ///
-    /// ```bash
-    /// xvfb-run -a cargo test --package systemprune-gui -- --ignored
-    /// ```
-    #[test]
-    #[ignore = "requires a display server; run with `cargo test -- --ignored` under xvfb-run"]
-    fn refresh_engines_does_not_panic_when_refreshing() {
-        let state = Rc::new(RefCell::new(State::new(Orchestrator::new(vec![]))));
-        {
-            let mut s = state.borrow_mut();
-            s.items
-                .push(make_item("a", "docker", Status::Unused, Category::Image));
-            s.items
-                .push(make_item("b", "ollama", Status::Unused, Category::Model));
-        }
-        let engines_list = ListBox::new();
-
-        // This must not panic.  The `with_rebuilding` guard
-        // around the `engines_list.append` loop ensures any
-        // future `row-inserted` handler that re-enters state
-        // sees the flag and bails.
-        refresh_engines(&state, &engines_list);
-
-        // Sanity check: the function should have appended one
-        // row per available engine.
-        assert!(
-            engines_list.row_at_index(0).is_some(),
-            "refresh_engines should have appended at least one row"
         );
     }
 
