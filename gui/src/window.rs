@@ -10,8 +10,8 @@
 use adw::prelude::*;
 use adw::{ActionRow, ExpanderRow, HeaderBar, ToolbarView};
 use gtk::{
-    Box as GtkBox, Button, CheckButton, Label, ListBox, Orientation,
-    ScrolledWindow, Separator,
+    gio, Box as GtkBox, Button, CheckButton, Label, ListBox, MenuButton,
+    Orientation, ScrolledWindow, Separator,
 };
 use std::cell::RefCell;
 use std::collections::{BTreeMap, HashSet};
@@ -41,6 +41,19 @@ pub fn build_window(app: &adw::Application) {
     delete_button.set_tooltip_text(Some("Delete selected items"));
     header.pack_start(&rescan_button);
     header.pack_end(&delete_button);
+
+    // --- Hamburger menu (About, etc.) ---
+    // Built with a `gio::Menu` model and a `MenuButton` so the
+    // entries are accessible via the standard Adwaita hamburger
+    // icon.  The single "About SystemPrune" entry activates the
+    // `app.about` action registered below.
+    let menu = gio::Menu::new();
+    menu.append(Some("About SystemPrune"), Some("app.about"));
+    let menu_button = MenuButton::new();
+    menu_button.set_icon_name("open-menu-symbolic");
+    menu_button.set_tooltip_text(Some("Menu"));
+    menu_button.set_menu_model(Some(&menu));
+    header.pack_end(&menu_button);
 
     // --- ToolbarView wraps header + content ---
     let toolbar_view = ToolbarView::new();
@@ -121,7 +134,85 @@ pub fn build_window(app: &adw::Application) {
         });
     }
 
+    // --- About dialog action ---
+    // The hamburger menu's "About SystemPrune" entry activates
+    // `app.about`; we handle it here by building and presenting
+    // an `adw::AboutWindow`.  The window is built lazily on
+    // first activation and cached in `state.about_window`, so
+    // repeated menu clicks bring the same dialog to the front
+    // instead of stacking new ones.  The window is transient
+    // for the main window and modal so it appears on top and
+    // is dismissed before the user can interact with the main
+    // window again.
+    //
+    // **One-shot assumption:** `build_window` is not designed
+    // to be called more than once for the same `app`.  If it
+    // is, this `app.add_action(&about_action)` call will panic
+    // with "action already registered".  Today `main` only
+    // calls `build_window` from `connect_activate`, and GTK
+    // fires that once per app run, so this is safe.  A future
+    // refactor that calls `build_window` multiple times should
+    // either guard this call with a check or move the action
+    // registration to `main`.
+    //
+    // `app` and `window` are cloned (cheap, they are
+    // `glib::Object`s) because the closure must own its
+    // captures to satisfy the `'static` bound on
+    // `SimpleAction::connect_activate`.
+    let about_action = gio::SimpleAction::new("about", None);
+    let app_clone = app.clone();
+    let parent_clone = window.clone();
+    let cache_clone = state.borrow().about_window.clone();
+    about_action.connect_activate(move |_, _| {
+        // Build the about window lazily on first activation
+        // and cache it.  The two borrows are sequential (each
+        // released before the next is taken) so no `RefMut` is
+        // held across `present()`.  `present()` may fire
+        // internal GTK signals, but none re-enter our `State`
+        // (the about window has no signal handlers connected
+        // to it), so no `with_rebuilding` wrap is needed.
+        if cache_clone.borrow().is_none() {
+            *cache_clone.borrow_mut() =
+                Some(build_about_window(&app_clone, &parent_clone));
+        }
+        if let Some(about) = cache_clone.borrow().as_ref() {
+            about.present();
+        }
+    });
+    app.add_action(&about_action);
+
     window.present();
+}
+
+/// Build the "About SystemPrune" dialog window.  The window is
+/// transient for `parent` and associated with `app` so it gets
+/// the correct GApplication icon and lifecycle.  All metadata is
+/// hard-coded from the workspace `Cargo.toml` and the `core`
+/// crate's `VERSION` constant.
+fn build_about_window(
+    app: &adw::Application,
+    parent: &adw::ApplicationWindow,
+) -> adw::AboutWindow {
+    let about = adw::AboutWindow::builder()
+        .application_name("SystemPrune")
+        .developer_name("SystemPrune Contributors")
+        .version(systemprune_core::VERSION)
+        .copyright("\u{00a9} 2024-2026 SystemPrune Contributors")
+        .license_type(gtk::License::MitX11)
+        .website("https://github.com/example/systemprune")
+        .issue_url("https://github.com/example/systemprune/issues")
+        .comments(
+            "Unified disk space cleaner for Docker, Podman, Flatpak, \
+             Snap, and Ollama.  Scans for unused artifacts across all \
+             detected engines and lets you delete them in bulk.",
+        )
+        .developers(vec!["SystemPrune Contributors".to_string()])
+        .translator_credits("Translate me!")
+        .build();
+    about.set_application(Some(app));
+    about.set_transient_for(Some(parent));
+    about.set_modal(true);
+    about
 }
 
 // ---------------------------------------------------------------------------
@@ -146,6 +237,11 @@ struct State {
     group_toggle_buttons: BTreeMap<Category, Button>,
     /// Error messages for failed deletions, keyed by (source, id).
     delete_errors: BTreeMap<(String, String), String>,
+    /// Cached `adw::AboutWindow` so repeated activations of the
+    /// "About SystemPrune" menu entry bring the same dialog to
+    /// the front instead of stacking new ones.  Built lazily on
+    /// first activation; the inner `Option` is `None` until then.
+    about_window: Rc<RefCell<Option<adw::AboutWindow>>>,
 }
 
 impl State {
@@ -164,6 +260,7 @@ impl State {
             item_checkboxes: BTreeMap::new(),
             group_toggle_buttons: BTreeMap::new(),
             delete_errors: BTreeMap::new(),
+            about_window: Rc::new(RefCell::new(None)),
         }
     }
 
