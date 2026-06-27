@@ -13,6 +13,7 @@
 //! * [`scanners::ALL_SCANNERS`] — the canonical list of built-in scanners.
 
 pub mod errors;
+pub mod log;
 pub mod models;
 pub mod orchestrator;
 pub mod probe;
@@ -21,6 +22,7 @@ pub mod size;
 pub mod sort;
 
 pub use errors::{EngineError, ParseError, SystemPruneError};
+pub use log::{ActionLog, LogEntry, LogLevel};
 pub use models::{Category, Engine, PrunableItem, Status};
 pub use orchestrator::{DeleteResult, Orchestrator, ScanResult};
 pub use probe::{probe_engines, which};

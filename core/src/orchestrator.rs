@@ -1,6 +1,7 @@
 //! Concurrent scanning and batched deletion across scanners.
 
 use crate::errors::{EngineError, SystemPruneError};
+use crate::log::ActionLog;
 use crate::models::PrunableItem;
 use crate::scanners::Scanner;
 use std::collections::BTreeMap;
@@ -63,6 +64,10 @@ pub struct Orchestrator {
     all: Vec<Arc<dyn Scanner>>,
     active: Vec<Arc<dyn Scanner>>,
     by_source: BTreeMap<String, Arc<dyn Scanner>>,
+    /// Optional action log.  When set, scan/delete events
+    /// are pushed here so the UIs can show a trace of what
+    /// the app is doing.  A `None` log is a no-op.
+    log: Option<ActionLog>,
 }
 
 impl Orchestrator {
@@ -82,7 +87,21 @@ impl Orchestrator {
             all,
             active,
             by_source,
+            log: None,
         }
+    }
+
+    /// Builder-style: attach an action log.  Returns `self`
+    /// for chaining.
+    pub fn with_log(mut self, log: ActionLog) -> Self {
+        self.log = Some(log);
+        self
+    }
+
+    /// Attach an action log to an already-constructed
+    /// orchestrator.
+    pub fn set_log(&mut self, log: ActionLog) {
+        self.log = Some(log);
     }
 
     pub fn all_scanners(&self) -> &[Arc<dyn Scanner>] {
@@ -99,6 +118,12 @@ impl Orchestrator {
 
     /// Run `get_items` on every active scanner in parallel.
     pub async fn scan_all(&self) -> ScanResult {
+        if let Some(log) = &self.log {
+            log.info(format!(
+                "Scanning started ({} active scanner(s))",
+                self.active.len()
+            ));
+        }
         let mut set = JoinSet::new();
         for scanner in &self.active {
             let s = scanner.clone();
@@ -110,17 +135,36 @@ impl Orchestrator {
         let mut items: Vec<PrunableItem> = Vec::new();
         let mut errors: Vec<EngineError> = Vec::new();
         while let Some(joined) = set.join_next().await {
-            if let Ok((_src, Ok(scanner_items))) = joined {
-                items.extend(scanner_items);
-            } else if let Ok((_src, Err(EngineError { message, engine, command, returncode, stderr }))) = joined {
-                errors.push(EngineError {
-                    message,
-                    engine,
-                    command,
-                    returncode,
-                    stderr,
-                });
+            match joined {
+                Ok((src, Ok(scanner_items))) => {
+                    if let Some(log) = &self.log {
+                        log.info(format!(
+                            "Scanner {} found {} item(s)",
+                            src,
+                            scanner_items.len()
+                        ));
+                    }
+                    items.extend(scanner_items);
+                }
+                Ok((src, Err(e))) => {
+                    if let Some(log) = &self.log {
+                        log.error(format!("Scanner {} failed: {}", src, e.message));
+                    }
+                    errors.push(e);
+                }
+                Err(join_err) => {
+                    if let Some(log) = &self.log {
+                        log.error(format!("Scanner task join error: {}", join_err));
+                    }
+                }
             }
+        }
+        if let Some(log) = &self.log {
+            log.info(format!(
+                "Scanning complete: {} item(s), {} error(s)",
+                items.len(),
+                errors.len()
+            ));
         }
         ScanResult { items, errors }
     }
@@ -152,6 +196,14 @@ impl Orchestrator {
         confirm: bool,
         delete_errors: Option<&BTreeMap<(String, String), String>>,
     ) -> Vec<DeleteResult> {
+        if let Some(log) = &self.log {
+            let total: u64 = items.iter().map(|i| i.size_bytes).sum();
+            log.info(format!(
+                "Delete started: {} item(s), {}",
+                items.len(),
+                crate::size::format_size(total as i64, true)
+            ));
+        }
         // Pre-allocate slots so the returned vector preserves the
         // caller's order regardless of completion order. Each slot
         // is filled either with the scanner's result or with a
@@ -242,9 +294,37 @@ impl Orchestrator {
 
         for (idx, rx) in pending {
             match rx.await {
-                Ok(result) => slots[idx] = Some(result),
+                Ok(result) => {
+                    if let Some(log) = &self.log {
+                        if result.success {
+                            log.info(format!(
+                                "Deleted {}:{} ({} bytes)",
+                                result.item.source,
+                                result.item.id,
+                                result.item.size_bytes
+                            ));
+                        } else {
+                            let msg = result
+                                .error
+                                .as_ref()
+                                .map(|e| e.message.as_str())
+                                .unwrap_or("(no error message)");
+                            log.error(format!(
+                                "Delete failed {}:{} \u{2014} {}",
+                                result.item.source, result.item.id, msg
+                            ));
+                        }
+                    }
+                    slots[idx] = Some(result);
+                }
                 Err(_) => {
                     let original = &items[idx];
+                    if let Some(log) = &self.log {
+                        log.error(format!(
+                            "Delete cancelled for {}:{}",
+                            original.source, original.id
+                        ));
+                    }
                     slots[idx] = Some(DeleteResult {
                         item: original.clone(),
                         success: false,
@@ -260,10 +340,26 @@ impl Orchestrator {
             }
         }
 
-        slots
+        let results: Vec<DeleteResult> = slots
             .into_iter()
             .map(|o| o.expect("all slots filled"))
-            .collect()
+            .collect();
+        if let Some(log) = &self.log {
+            let ok = results.iter().filter(|r| r.success).count();
+            let fail = results.len() - ok;
+            let freed: u64 = results
+                .iter()
+                .filter(|r| r.success)
+                .map(|r| r.item.size_bytes)
+                .sum();
+            log.info(format!(
+                "Delete complete: {} succeeded, {} failed, {} freed",
+                ok,
+                fail,
+                crate::size::format_size(freed as i64, true)
+            ));
+        }
+        results
     }
 
     /// Return the scanner responsible for `item`, if any.

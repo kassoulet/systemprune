@@ -2,6 +2,7 @@
 
 use clap::{Parser, Subcommand};
 use std::process::ExitCode;
+use systemprune_core::log::ActionLog;
 use systemprune_core::models::PrunableItem;
 use systemprune_core::orchestrator::Orchestrator;
 use systemprune_core::scanners::all_scanners;
@@ -51,9 +52,10 @@ enum Command {
 #[tokio::main(flavor = "current_thread")]
 async fn main() -> ExitCode {
     let cli = Cli::parse();
-    let orchestrator = Orchestrator::new(all_scanners());
+    let log = ActionLog::default();
+    let orchestrator = Orchestrator::new(all_scanners()).with_log(log.clone());
 
-    match cli.command {
+    let rc = match cli.command {
         Command::Version => {
             println!("systemprune {}", systemprune_core::VERSION);
             ExitCode::SUCCESS
@@ -193,7 +195,21 @@ async fn main() -> ExitCode {
             }
             ExitCode::from(rc)
         }
+    };
+
+    // After the command finishes, print the action log to
+    // stderr so the user can see what the app did (scan
+    // start, per-scanner results, delete attempts, errors).
+    // Only print when the log is non-empty to avoid noise
+    // on trivial invocations like `systemprune version`.
+    if !log.is_empty() {
+        eprintln!();
+        eprintln!("--- action log ---");
+        eprint!("{}", log.format_lines());
+        eprintln!();
     }
+
+    rc
 }
 
 fn error_to_string(e: &Option<systemprune_core::errors::EngineError>) -> String {

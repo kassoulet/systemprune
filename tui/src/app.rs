@@ -17,10 +17,11 @@ use crossterm::event::{self, Event, KeyCode, KeyEvent, KeyEventKind, KeyModifier
 use ratatui::layout::{Constraint, Direction, Layout, Rect};
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
-use ratatui::widgets::{Block, Borders, Cell, Paragraph, Row, Table, TableState};
+use ratatui::widgets::{Block, Borders, Cell, Paragraph, Row, Table, TableState, Wrap};
 use std::collections::{BTreeMap, HashSet};
 use std::io::Stdout;
 use std::time::Duration;
+use systemprune_core::log::ActionLog;
 use systemprune_core::models::{Category, PrunableItem, Status};
 use systemprune_core::orchestrator::Orchestrator;
 use systemprune_core::scanners::all_scanners;
@@ -83,6 +84,13 @@ struct App {
     /// Active sort mode for items within each category group.
     /// Cycled by the `s` key binding.
     sort_mode: SortMode,
+    /// Shared action log.  The orchestrator pushes entries at
+    /// scan/delete boundaries; the TUI reads them when the
+    /// user toggles the log view with `l`.
+    log: ActionLog,
+    /// When true, the main view is replaced by a scrollable
+    /// log view.  Toggled by the `l` key binding.
+    show_log: bool,
 }
 
 impl App {
@@ -100,6 +108,8 @@ impl App {
             quit: false,
             delete_errors: BTreeMap::new(),
             sort_mode: SortMode::Default,
+            log: ActionLog::default(),
+            show_log: false,
         }
     }
 
@@ -249,13 +259,17 @@ impl App {
                 ])
                 .split(f.size());
             draw_header(f, chunks[0]);
-            let body_chunks = Layout::default()
-                .direction(Direction::Horizontal)
-                .constraints([Constraint::Length(24), Constraint::Min(0)])
-                .split(chunks[1]);
-            self.sidebar_area = body_chunks[0];
-            draw_sidebar(f, self, body_chunks[0]);
-            draw_table(f, self, body_chunks[1]);
+            if self.show_log {
+                draw_log_view(f, self, chunks[1]);
+            } else {
+                let body_chunks = Layout::default()
+                    .direction(Direction::Horizontal)
+                    .constraints([Constraint::Length(24), Constraint::Min(0)])
+                    .split(chunks[1]);
+                self.sidebar_area = body_chunks[0];
+                draw_sidebar(f, self, body_chunks[0]);
+                draw_table(f, self, body_chunks[1]);
+            }
             draw_status(f, &self.status, chunks[2]);
         })?;
         Ok(())
@@ -270,6 +284,17 @@ impl App {
         let shift = key.modifiers.contains(KeyModifiers::SHIFT);
         match key.code {
             KeyCode::Char('q') | KeyCode::Esc => self.quit = true,
+            KeyCode::Char('l') => {
+                // Toggle the log view.  In the log view, `q`/`Esc`
+                // still quit (matching the rest of the TUI), and
+                // `l` again returns to the items view.
+                self.show_log = !self.show_log;
+                self.status = if self.show_log {
+                    format!("Showing log ({} entries). l=items, q=quit.", self.log.len())
+                } else {
+                    "Back to items.".to_string()
+                };
+            }
             KeyCode::Char('r') => {
                 if !self.busy {
                     self.busy = true;
@@ -612,7 +637,7 @@ fn draw_header(f: &mut ratatui::Frame, area: Rect) {
                 .fg(Color::Cyan)
                 .add_modifier(Modifier::BOLD),
         ),
-        Span::raw("  s=sort  a=select all  d=delete  r=rescan  q=quit"),
+        Span::raw("  s=sort  l=log  a=select all  d=delete  r=rescan  q=quit"),
     ])])
     .block(Block::default().borders(Borders::BOTTOM));
     f.render_widget(header, area);
@@ -747,6 +772,18 @@ fn draw_status(f: &mut ratatui::Frame, status: &str, area: Rect) {
     f.render_widget(widget, area);
 }
 
+/// Render the action log as a scrollable text view.  Shows
+/// the formatted log lines (oldest at the top, newest at the
+/// bottom) inside a bordered block.
+fn draw_log_view(f: &mut ratatui::Frame, app: &App, area: Rect) {
+    let text = app.log.format_lines();
+    let title = format!("Action log ({} entries)", app.log.len());
+    let widget = Paragraph::new(text)
+        .block(Block::default().borders(Borders::ALL).title(title))
+        .wrap(Wrap { trim: false });
+    f.render_widget(widget, area);
+}
+
 // ---------------------------------------------------------------------------
 // Tests
 // ---------------------------------------------------------------------------
@@ -797,6 +834,8 @@ mod tests {
             quit: false,
             delete_errors: BTreeMap::new(),
             sort_mode: SortMode::Default,
+            log: ActionLog::default(),
+            show_log: false,
         }
     }
 

@@ -16,6 +16,7 @@ use gtk::{
 use std::cell::RefCell;
 use std::collections::{BTreeMap, HashSet};
 use std::rc::Rc;
+use systemprune_core::log::ActionLog;
 use systemprune_core::models::{Category, PrunableItem};
 use systemprune_core::orchestrator::Orchestrator;
 use systemprune_core::scanners::all_scanners;
@@ -32,7 +33,12 @@ pub fn build_window(app: &adw::Application) {
         .build();
 
     let orchestrator = Orchestrator::new(all_scanners());
-    let state = Rc::new(RefCell::new(State::new(orchestrator)));
+    let log = ActionLog::default();
+    // Hand a clone of the log to the orchestrator so scan/delete
+    // events are recorded there.  The `State` holds a second
+    // clone so the GUI can read entries for the log dialog.
+    let orchestrator = orchestrator.with_log(log.clone());
+    let state = Rc::new(RefCell::new(State::new(orchestrator, log)));
 
     // --- Header bar ---
     let header = HeaderBar::new();
@@ -70,12 +76,13 @@ pub fn build_window(app: &adw::Application) {
     sort_dropdown.set_size_request(180, -1);
     header.pack_end(&sort_dropdown);
 
-    // --- Hamburger menu (About, etc.) ---
+    // --- Hamburger menu (About, Log, etc.) ---
     // Built with a `gio::Menu` model and a `MenuButton` so the
     // entries are accessible via the standard Adwaita hamburger
-    // icon.  The single "About SystemPrune" entry activates the
-    // `app.about` action registered below.
+    // icon.  Entries activate the corresponding `app.*` action
+    // registered further down.
     let menu = gio::Menu::new();
+    menu.append(Some("View Log"), Some("app.log"));
     menu.append(Some("About SystemPrune"), Some("app.about"));
     let menu_button = MenuButton::new();
     menu_button.set_icon_name("open-menu-symbolic");
@@ -207,7 +214,80 @@ pub fn build_window(app: &adw::Application) {
     });
     app.add_action(&about_action);
 
+    // --- Action log dialog action ---
+    // The hamburger menu's "View Log" entry activates
+    // `app.log`; we handle it here by presenting a cached
+    // `adw::MessageDialog` whose body is the current
+    // formatted log.  The dialog is rebuilt fresh on every
+    // activation (it's cheap) but the `MessageDialog` object
+    // is cached so GTK doesn't stack a new window each time.
+    let log_action = gio::SimpleAction::new("log", None);
+    let parent_for_log = window.clone();
+    let state_for_log = state.clone();
+    log_action.connect_activate(move |_, _| {
+        present_log_dialog(&state_for_log, &parent_for_log);
+    });
+    app.add_action(&log_action);
+
     window.present();
+}
+
+/// Build or refresh the action-log `adw::MessageDialog` and
+/// present it.  The dialog object is cached in
+/// `state.log_window` so repeated activations reuse the same
+/// window instead of stacking new ones; the body text is
+/// refreshed on every activation so the user always sees the
+/// latest entries.
+fn present_log_dialog(state: &Rc<RefCell<State>>, parent: &adw::ApplicationWindow) {
+    let (log_clone, cache_clone) = {
+        let s = state.borrow();
+        (s.log.clone(), s.log_window.clone())
+    };
+    if cache_clone.borrow().is_none() {
+        let dialog = adw::MessageDialog::new(
+            Some(parent),
+            Some("Action log"),
+            Some("Scanning, deletion, and error events."),
+        );
+        dialog.add_response("close", "Close");
+        dialog.add_response("clear", "Clear log");
+        dialog.set_default_response(Some("close"));
+        dialog.set_close_response("close");
+        dialog.set_modal(true);
+        // Clear-log handler.  Cloned `log` handle so the
+        // closure can call `log.clear()` after the dialog
+        // is rebuilt.
+        let log_for_clear = log_clone.clone();
+        let state_for_clear = state.clone();
+        let parent_for_clear = parent.clone();
+        dialog.connect_response(Some("clear"), move |_, _| {
+            log_for_clear.clear();
+            // Re-present with empty body so the user sees
+            // the cleared state immediately.
+            present_log_dialog(&state_for_clear, &parent_for_clear);
+        });
+        *cache_clone.borrow_mut() = Some(dialog);
+    }
+    let dialog = cache_clone.borrow();
+    let dialog = dialog.as_ref().expect("dialog just inserted");
+    // Refresh the body with the current snapshot.  Bound
+    // the visible text to the last 200 lines so a long
+    // session doesn't produce an unreasonably tall dialog.
+    let text = log_clone.format_lines();
+    let lines: Vec<&str> = text.lines().collect();
+    let truncated: String = if lines.len() > 200 {
+        let start = lines.len() - 200;
+        lines[start..].join("\n")
+    } else {
+        text.clone()
+    };
+    let body = if truncated.is_empty() {
+        "(log is empty)".to_string()
+    } else {
+        truncated
+    };
+    dialog.set_body(body.as_str());
+    dialog.present();
 }
 
 /// Build the "About SystemPrune" dialog window.  The window is
@@ -271,10 +351,20 @@ struct State {
     /// Active sort mode for items within each category group.
     /// Set by the header-bar sort dropdown.
     sort_mode: SortMode,
+    /// Shared action log.  The orchestrator pushes entries at
+    /// scan/delete boundaries; the GUI reads them for the log
+    /// dialog.  Cloned so the orchestrator and the GUI can
+    /// each hold an independent handle into the same log.
+    log: ActionLog,
+    /// Cached `adw::MessageDialog` for the action log so
+    /// repeated activations of the "View Log" menu entry
+    /// bring the same dialog to the front instead of
+    /// stacking new ones.  Built lazily on first activation.
+    log_window: Rc<RefCell<Option<adw::MessageDialog>>>,
 }
 
 impl State {
-    fn new(orchestrator: Orchestrator) -> Self {
+    fn new(orchestrator: Orchestrator, log: ActionLog) -> Self {
         Self {
             orchestrator,
             items: Vec::new(),
@@ -291,6 +381,8 @@ impl State {
             delete_errors: BTreeMap::new(),
             about_window: Rc::new(RefCell::new(None)),
             sort_mode: SortMode::Default,
+            log,
+            log_window: Rc::new(RefCell::new(None)),
         }
     }
 
@@ -1314,6 +1406,7 @@ mod tests {
     //! surface of failed deletions in the GUI.
 
     use super::*;
+    use systemprune_core::log::ActionLog;
     use systemprune_core::models::{Engine, Status};
 
     fn make_item(id: &str, source: &str, status: Status, category: Category) -> PrunableItem {
@@ -1633,7 +1726,10 @@ mod tests {
     // --- with_rebuilding helper ---
 
     fn empty_state() -> Rc<RefCell<State>> {
-        Rc::new(RefCell::new(State::new(Orchestrator::new(vec![]))))
+        Rc::new(RefCell::new(State::new(
+            Orchestrator::new(vec![]),
+            systemprune_core::log::ActionLog::default(),
+        )))
     }
 
     #[test]
@@ -1759,7 +1855,10 @@ mod tests {
     /// the void, the per-item callback never runs, and the test
     /// cannot reproduce the original `panic.txt` deadlock.
     fn make_state_with_one_docker_item() -> Rc<RefCell<State>> {
-        let state = Rc::new(RefCell::new(State::new(Orchestrator::new(vec![]))));
+        let state = Rc::new(RefCell::new(State::new(
+            Orchestrator::new(vec![]),
+            ActionLog::default(),
+        )));
         {
             let mut s = state.borrow_mut();
             s.items
@@ -1881,7 +1980,10 @@ mod tests {
         // connect the real `on_item_toggled` callback internally.
         // This is the scenario the defensive `with_rebuilding`
         // wrap is designed to protect.
-        let state = Rc::new(RefCell::new(State::new(Orchestrator::new(vec![]))));
+        let state = Rc::new(RefCell::new(State::new(
+            Orchestrator::new(vec![]),
+            ActionLog::default(),
+        )));
         let item = make_item("a", "docker", Status::Unused, Category::Image);
 
         // This must not panic, even though `make_item_row`
@@ -1930,7 +2032,10 @@ mod tests {
     #[test]
     #[ignore = "requires a display server; run with `cargo test -- --ignored` under xvfb-run"]
     fn update_group_toggle_button_does_not_panic_when_refreshing() {
-        let state = Rc::new(RefCell::new(State::new(Orchestrator::new(vec![]))));
+        let state = Rc::new(RefCell::new(State::new(
+            Orchestrator::new(vec![]),
+            ActionLog::default(),
+        )));
         {
             let mut s = state.borrow_mut();
             s.items
