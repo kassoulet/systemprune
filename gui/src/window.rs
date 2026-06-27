@@ -101,8 +101,9 @@ pub fn build_window(app: &adw::Application) {
         let state = state.clone();
         let status_label = status.clone();
         let groups_box = groups_box.clone();
+        let window_clone = window.clone();
         delete_button.connect_clicked(move |_| {
-            do_delete(&state, &status_label, &groups_box);
+            do_delete(&state, &status_label, &groups_box, &window_clone);
         });
     }
 
@@ -466,6 +467,7 @@ fn do_delete(
     state: &Rc<RefCell<State>>,
     status: &Label,
     groups_box: &GtkBox,
+    window: &adw::ApplicationWindow,
 ) {
     if state.borrow().busy {
         return;
@@ -588,6 +590,19 @@ fn do_delete(
         ));
     }
     status.set_text(&msg);
+
+    // Show a modal popup with the per-batch summary.  We only
+    // present the dialog when at least one item was actually
+    // processed (i.e. the orchestrator returned results) -- a
+    // selection of only previously-failed items cleans up
+    // silently so the user is not nagged by an empty "Deleted 0
+    // items" dialog.  The status bar above already conveys the
+    // skip summary in that case.
+    if !results.is_empty() {
+        let render = describe_delete_results(&results);
+        let dialog = build_delete_results_dialog(window, &render);
+        dialog.present();
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -851,6 +866,152 @@ pub(crate) struct GuiItemRowRender {
     pub tooltip: Option<String>,
     pub css_class: Option<&'static str>,
     pub checkbox_sensitive: bool,
+}
+
+/// Description of the post-delete results dialog.  Extracted from
+/// the dialog builder so unit tests can pin the contract of the
+/// summary text and the failed-items list without instantiating
+/// GTK widgets.
+#[derive(Debug, PartialEq, Eq, Clone)]
+pub(crate) struct DeleteResultsDialogRender {
+    /// Window title (e.g. "Deletion complete").
+    pub heading: String,
+    /// Primary body text (e.g. "Deleted 3 items, freed 1.2 GB.").
+    pub body: String,
+    /// Secondary text listing the failed items, if any.
+    /// `None` when every item succeeded.
+    pub extra_info: Option<String>,
+}
+
+/// Pure description of the post-delete popup content, given the
+/// orchestrator's per-item results.  Mirrors the structure of
+/// `adw::MessageDialog`: a short heading, a one-line body, and an
+/// optional extra-info block for the failed-items list.
+///
+/// **Empty input.**  The function does not panic on an empty
+/// `results` slice; it produces a neutral "no results" render.
+/// The caller (`do_delete`) is responsible for deciding whether
+/// to show the dialog at all (currently: show whenever
+/// `!results.is_empty()`).
+pub(crate) fn describe_delete_results(
+    results: &[systemprune_core::orchestrator::DeleteResult],
+) -> DeleteResultsDialogRender {
+    let ok = results.iter().filter(|r| r.success).count();
+    let fail = results.len() - ok;
+    let freed: i64 = results
+        .iter()
+        .filter(|r| r.success)
+        .map(|r| r.item.size_bytes as i64)
+        .sum();
+    let heading = if fail == 0 {
+        "Deletion complete"
+    } else if ok == 0 {
+        "Deletion failed"
+    } else {
+        "Deletion completed with errors"
+    };
+    let body = if results.is_empty() {
+        "No items were processed.".to_string()
+    } else if fail == 0 {
+        format!(
+            "Deleted {} item{}, freed {}.",
+            ok,
+            if ok == 1 { "" } else { "s" },
+            format_size(freed, true)
+        )
+    } else if ok == 0 {
+        format!(
+            "All {} item{} failed to delete.",
+            fail,
+            if fail == 1 { "" } else { "s" }
+        )
+    } else {
+        format!(
+            "Deleted {} item{}, freed {}. {} failed.",
+            ok,
+            if ok == 1 { "" } else { "s" },
+            format_size(freed, true),
+            fail
+        )
+    };
+    let extra_info = if fail > 0 {
+        // One line per failed item: bullet + source: name + em-dash
+        // + short error message.  We deliberately use the
+        // `EngineError::message` field (not `to_string()`) so the
+        // dialog stays readable; the full stderr is already in the
+        // per-item tooltip for users who want the gory details.
+        let mut lines: Vec<String> = results
+            .iter()
+            .filter(|r| !r.success)
+            .map(|r| {
+                let err_msg = r
+                    .error
+                    .as_ref()
+                    .map(|e| e.message.as_str())
+                    .unwrap_or("(no error message)");
+                format!(
+                    "\u{2022} {}: {} \u{2014} {}",
+                    r.item.source, r.item.name, err_msg
+                )
+            })
+            .collect();
+        // Cap the list to keep the dialog a reasonable size.  The
+        // count of remaining failures is appended so the user knows
+        // there is more if they re-run with a smaller selection.
+        const MAX_LINES: usize = 20;
+        if lines.len() > MAX_LINES {
+            let shown = lines.drain(..MAX_LINES).collect::<Vec<_>>();
+            let remaining = lines.len();
+            let mut out = shown;
+            out.push(format!("\u{2026}and {} more", remaining));
+            Some(out.join("\n"))
+        } else {
+            Some(lines.join("\n"))
+        }
+    } else {
+        None
+    };
+    DeleteResultsDialogRender {
+        heading: heading.to_string(),
+        body,
+        extra_info,
+    }
+}
+
+/// Build the post-delete results `adw::MessageDialog`.  The
+/// dialog is transient for `parent` and modal so it appears on
+/// top of the main window and is dismissed before the user can
+/// interact with the main window again (matching the
+/// `build_about_window` precedent).  A single "OK" response
+/// closes it.
+///
+/// **Why no `set_extra_info`?**  `adw::MessageDialog` exposes
+/// the ``extra-info`` property in libadwaita >= 1.2, but the
+/// `libadwaita-rs` 0.7 binding does not surface a typed
+/// `set_extra_info` setter on `MessageDialog` (the property is
+/// only reachable through the generic GObject property API).
+/// Concatenating the failure list into the body keeps the
+/// dialog portable across the Rust binding versions and
+/// produces an identical visual result.
+fn build_delete_results_dialog(
+    parent: &adw::ApplicationWindow,
+    render: &DeleteResultsDialogRender,
+) -> adw::MessageDialog {
+    let body = if let Some(extra) = &render.extra_info {
+        format!("{}\n\n{}", render.body, extra)
+    } else {
+        render.body.clone()
+    };
+    let dialog = adw::MessageDialog::new(
+        Some(parent),
+        Some(&render.heading),
+        Some(&body),
+    );
+    dialog.add_response("ok", "OK");
+    dialog.set_default_response(Some("ok"));
+    dialog.set_close_response("ok");
+    dialog.set_modal(true);
+    dialog
 }
 
 // ---------------------------------------------------------------------------
@@ -1223,6 +1384,145 @@ mod tests {
         assert_eq!(render.title, "a");
         assert_eq!(render.css_class, None);
         assert!(render.checkbox_sensitive);
+    }
+
+    // --- delete results dialog ---
+
+    use systemprune_core::errors::EngineError;
+    use systemprune_core::orchestrator::DeleteResult;
+
+    fn make_result(
+        id: &str,
+        source: &str,
+        size: u64,
+        success: bool,
+        err: Option<&str>,
+    ) -> DeleteResult {
+        // Reuse the existing `make_item` helper so the per-item
+        // defaults (engine mapping, category, status) stay in
+        // one place; then override only what `DeleteResult` needs.
+        let mut item = make_item(id, source, Status::Unused, Category::Image);
+        item.size_bytes = size;
+        let error = err.map(|m| {
+            EngineError::new(
+                m.to_string(),
+                source.to_string(),
+                vec![],
+                None,
+                String::new(),
+            )
+        });
+        DeleteResult {
+            item,
+            success,
+            error,
+        }
+    }
+
+    #[test]
+    fn describe_delete_results_all_success_uses_complete_heading() {
+        let results = vec![
+            make_result("a", "docker", 1024, true, None),
+            make_result("b", "docker", 2048, true, None),
+        ];
+        let render = describe_delete_results(&results);
+        assert_eq!(render.heading, "Deletion complete");
+        assert!(
+            render.body.contains("Deleted 2 items"),
+            "body should mention plural count, got: {}",
+            render.body
+        );
+        assert!(render.body.contains("freed"));
+        assert!(render.extra_info.is_none());
+    }
+
+    #[test]
+    fn describe_delete_results_singular_success_uses_singular_form() {
+        let results = vec![make_result("a", "docker", 1024, true, None)];
+        let render = describe_delete_results(&results);
+        assert_eq!(render.heading, "Deletion complete");
+        assert!(
+            render.body.contains("Deleted 1 item,") && !render.body.contains("1 items,"),
+            "body should use singular 'item', got: {}",
+            render.body
+        );
+        assert!(render.extra_info.is_none());
+    }
+
+    #[test]
+    fn describe_delete_results_all_failure_uses_failed_heading() {
+        let results = vec![
+            make_result("a", "docker", 1024, false, Some("permission denied")),
+            make_result("b", "ollama", 2048, false, Some("model busy")),
+        ];
+        let render = describe_delete_results(&results);
+        assert_eq!(render.heading, "Deletion failed");
+        assert!(render.body.contains("All 2 items failed"));
+        let extra = render.extra_info.expect("extra_info must be present on failure");
+        assert!(extra.contains("permission denied"));
+        assert!(extra.contains("model busy"));
+        assert!(extra.contains("docker: a"));
+        assert!(extra.contains("ollama: b"));
+    }
+
+    #[test]
+    fn describe_delete_results_mixed_uses_completed_with_errors_heading() {
+        let results = vec![
+            make_result("a", "docker", 1024, true, None),
+            make_result("b", "docker", 2048, false, Some("boom")),
+        ];
+        let render = describe_delete_results(&results);
+        assert_eq!(render.heading, "Deletion completed with errors");
+        assert!(render.body.contains("Deleted 1 item,"));
+        assert!(render.body.contains("1 failed"));
+        let extra = render
+            .extra_info
+            .expect("extra_info must be present on any failure");
+        assert!(extra.contains("boom"));
+        // Successful item must not appear in the failure list.
+        assert!(!extra.contains("docker: a\n"));
+    }
+
+    #[test]
+    fn describe_delete_results_empty_slice_is_neutral_no_panic() {
+        let render = describe_delete_results(&[]);
+        assert_eq!(render.body, "No items were processed.");
+        assert!(render.extra_info.is_none());
+    }
+
+    #[test]
+    fn describe_delete_results_failure_with_no_error_message_uses_placeholder() {
+        // A scanner that fails without populating `error.message`
+        // (shouldn't happen in practice but is a safe fallback)
+        // must still produce a readable line, not an empty bullet.
+        let results = vec![make_result("a", "docker", 1024, false, None)];
+        let render = describe_delete_results(&results);
+        let extra = render.extra_info.expect("extra_info must be present");
+        assert!(
+            extra.contains("(no error message)"),
+            "missing-error fallback should be shown, got: {extra}"
+        );
+    }
+
+    #[test]
+    fn describe_delete_results_truncates_long_failure_lists() {
+        // 25 failures should be capped at 20 with a "and N more"
+        // tail.  The cap keeps the dialog at a reasonable height
+        // even for a bad batch.
+        let results: Vec<DeleteResult> = (0..25)
+            .map(|i| make_result(&format!("img{i}"), "docker", 1024, false, Some("boom")))
+            .collect();
+        let render = describe_delete_results(&results);
+        let extra = render.extra_info.expect("extra_info must be present");
+        // Exactly 20 bullet lines + one "and N more" tail = 21
+        // newlines, so 21 non-empty lines after split('\n').
+        let lines: Vec<&str> = extra.lines().collect();
+        assert_eq!(lines.len(), 21, "expected 20 items + 1 tail line");
+        assert!(
+            lines.last().unwrap().contains("and 5 more"),
+            "tail should report remaining count, got: {:?}",
+            lines.last()
+        );
     }
 
     // --- per-group toggle button ---
