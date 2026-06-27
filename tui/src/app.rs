@@ -13,7 +13,7 @@
 //! - `d` — delete selected
 
 use anyhow::Result;
-use crossterm::event::{self, Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
+use crossterm::event::{self, Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers, MouseEvent, MouseButton};
 use ratatui::layout::{Constraint, Direction, Layout, Rect};
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
@@ -60,6 +60,8 @@ struct App {
     collapsed: HashSet<Category>,
     /// Flat list of rows (group headers + visible items) shown in the table.
     display_rows: Vec<DisplayRow>,
+    /// Cached sidebar area for hit testing.
+    sidebar_area: Rect,
 }
 
 impl App {
@@ -73,6 +75,7 @@ impl App {
             busy: true,
             collapsed: HashSet::new(),
             display_rows: Vec::new(),
+            sidebar_area: Rect::default(),
         }
     }
 
@@ -134,7 +137,13 @@ impl App {
                 ])
                 .split(f.size());
             draw_header(f, chunks[0]);
-            draw_body(f, self, chunks[1]);
+            let body_chunks = Layout::default()
+                .direction(Direction::Horizontal)
+                .constraints([Constraint::Length(24), Constraint::Min(0)])
+                .split(chunks[1]);
+            self.sidebar_area = body_chunks[0];
+            draw_sidebar(f, self, body_chunks[0]);
+            draw_table(f, self, body_chunks[1]);
             draw_status(f, &self.status, chunks[2]);
         })?;
         Ok(())
@@ -281,6 +290,40 @@ impl App {
         self.rebuild_display_rows();
     }
 
+    fn handle_mouse(&mut self, mouse: MouseEvent) {
+        if mouse.kind != crossterm::event::MouseEventKind::Down(MouseButton::Left) {
+            return;
+        }
+        let x = mouse.column;
+        let y = mouse.row;
+        // Check if click is inside the sidebar content area.
+        let sa = self.sidebar_area;
+        // Content starts at sa.y + 1 (top border) and ends at sa.y + sa.height - 1 (bottom border).
+        if x >= sa.x && x < sa.x + sa.width && y > sa.y && y < sa.y + sa.height - 1 {
+            let line_idx = (y - sa.y - 1) as usize;
+            let engines: Vec<String> = self
+                .orchestrator
+                .available_engines()
+                .into_iter()
+                .collect();
+            if let Some(engine) = engines.get(line_idx) {
+                self.scroll_to_engine(engine);
+            }
+        }
+    }
+
+    fn scroll_to_engine(&mut self, engine: &str) {
+        // Find the first display row that contains an item from this engine.
+        for (i, dr) in self.display_rows.iter().enumerate() {
+            if let DisplayRow::Item(idx) = dr {
+                if self.items[*idx].source == engine {
+                    self.table_state.select(Some(i));
+                    return;
+                }
+            }
+        }
+    }
+
     async fn do_scan(&mut self) {
         let result = self.orchestrator.scan_all().await;
         let item_count = result.items.len();
@@ -350,8 +393,10 @@ pub fn run(terminal: &mut TerminalType) -> Result<()> {
 
     loop {
         if event::poll(Duration::from_millis(200))? {
-            if let Event::Key(key) = event::read()? {
-                app.handle_key(key);
+            match event::read()? {
+                Event::Key(key) => app.handle_key(key),
+                Event::Mouse(mouse) => app.handle_mouse(mouse),
+                _ => {}
             }
         }
         if app.busy {
@@ -385,15 +430,6 @@ fn draw_header(f: &mut ratatui::Frame, area: Rect) {
     ])])
     .block(Block::default().borders(Borders::BOTTOM));
     f.render_widget(header, area);
-}
-
-fn draw_body(f: &mut ratatui::Frame, app: &mut App, area: Rect) {
-    let chunks = Layout::default()
-        .direction(Direction::Horizontal)
-        .constraints([Constraint::Length(24), Constraint::Min(0)])
-        .split(area);
-    draw_sidebar(f, app, chunks[0]);
-    draw_table(f, app, chunks[1]);
 }
 
 fn draw_sidebar(f: &mut ratatui::Frame, app: &App, area: Rect) {
@@ -489,9 +525,25 @@ fn draw_table(f: &mut ratatui::Frame, app: &mut App, area: Rect) {
         Constraint::Length(10),
         Constraint::Min(20),
     ];
+    let sel_total: u64 = app
+        .items
+        .iter()
+        .filter(|i| app.selected.contains(&(i.source.clone(), i.id.clone())))
+        .map(|i| i.size_bytes)
+        .sum();
+    let title = if app.selected.is_empty() {
+        "Items".to_string()
+    } else {
+        format!(
+            "Items  [{}/{} selected, {}]",
+            app.selected.len(),
+            app.items.len(),
+            format_size(sel_total as i64, true)
+        )
+    };
     let table = Table::new(rows, widths)
         .header(header)
-        .block(Block::default().borders(Borders::ALL).title("Items"))
+        .block(Block::default().borders(Borders::ALL).title(title))
         .highlight_style(Style::default().add_modifier(Modifier::REVERSED));
     f.render_stateful_widget(table, area, &mut app.table_state);
 }
