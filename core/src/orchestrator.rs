@@ -131,6 +131,17 @@ impl Orchestrator {
     /// false are skipped and reported in the result with
     /// `success = false`.
     ///
+    /// If `confirm` is true and `delete_errors` is `Some(map)`,
+    /// items whose `(source, id)` is present in the map are also
+    /// skipped with a synthetic "previously failed" error. This
+    /// is defence-in-depth against re-queuing items the engine has
+    /// already rejected: the UIs already filter failed items out
+    /// of their `to_delete` selection, but a future code path or a
+    /// programmatic caller (e.g. a test) might bypass the filter,
+    /// and we want the orchestrator to stay correct on its own.
+    /// Pass `None` to opt out (e.g. from the CLI which has no
+    /// concept of persistent failure tracking).
+    ///
     /// The returned vector has the same length and ordering as
     /// *items*; entries for items that had no matching scanner or
     /// whose owning task failed to join are still present (with
@@ -139,6 +150,7 @@ impl Orchestrator {
         &self,
         items: &[PrunableItem],
         confirm: bool,
+        delete_errors: Option<&BTreeMap<(String, String), String>>,
     ) -> Vec<DeleteResult> {
         // Pre-allocate slots so the returned vector preserves the
         // caller's order regardless of completion order. Each slot
@@ -158,6 +170,8 @@ impl Orchestrator {
             let engine_name = item.engine.as_str().to_string();
             let item_source = item.source.clone();
             let item_name = item.name.clone();
+            let item_id = item.id.clone();
+            let item_key = (item_source.clone(), item_id);
 
             if confirm && !item.is_safe_to_delete() {
                 slots[idx] = Some(DeleteResult {
@@ -165,6 +179,23 @@ impl Orchestrator {
                     success: false,
                     error: Some(EngineError::new(
                         format!("Refusing to delete active item: {}", item_name),
+                        engine_name,
+                        vec![],
+                        None,
+                        "",
+                    )),
+                });
+                continue;
+            }
+            if confirm && delete_errors.map_or(false, |m| m.contains_key(&item_key)) {
+                slots[idx] = Some(DeleteResult {
+                    item,
+                    success: false,
+                    error: Some(EngineError::new(
+                        format!(
+                            "Refusing to delete item that previously failed: {}",
+                            item_name
+                        ),
                         engine_name,
                         vec![],
                         None,

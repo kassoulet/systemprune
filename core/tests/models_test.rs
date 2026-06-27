@@ -119,3 +119,72 @@ fn status_serde_round_trip() {
     assert_eq!(parsed.status, Status::Dangling);
     assert_eq!(parsed.size_bytes, 1024);
 }
+
+fn unused(id: &str, source: &str) -> PrunableItem {
+    PrunableItem {
+        id: id.to_string(),
+        name: id.to_string(),
+        engine: Engine::Docker,
+        source: source.to_string(),
+        category: Category::Image,
+        size_bytes: 1024,
+        status: Status::Unused,
+        extra: BTreeMap::new(),
+    }
+}
+
+#[test]
+fn is_deletable_for_real_true_for_unused_item_with_no_errors() {
+    let item = unused("a", "docker");
+    let errors: BTreeMap<(String, String), String> = BTreeMap::new();
+    assert!(item.is_deletable_for_real(&errors));
+}
+
+#[test]
+fn is_deletable_for_real_false_for_failed_item() {
+    // A previous delete failure must block the next attempt, even
+    // though the item itself is technically safe (Status::Unused).
+    let item = unused("a", "docker");
+    let mut errors: BTreeMap<(String, String), String> = BTreeMap::new();
+    errors.insert(
+        ("docker".to_string(), "a".to_string()),
+        "permission denied".to_string(),
+    );
+    assert!(!item.is_deletable_for_real(&errors));
+}
+
+#[test]
+fn is_deletable_for_real_false_for_active_item() {
+    let mut item = unused("a", "docker");
+    item.status = Status::Active;
+    let errors: BTreeMap<(String, String), String> = BTreeMap::new();
+    assert!(!item.is_deletable_for_real(&errors));
+}
+
+#[test]
+fn is_deletable_for_real_false_for_deleted_item() {
+    let mut item = unused("a", "docker");
+    item.status = Status::Deleted;
+    let errors: BTreeMap<(String, String), String> = BTreeMap::new();
+    assert!(!item.is_deletable_for_real(&errors));
+}
+
+#[test]
+fn is_deletable_for_real_error_key_must_match_source_and_id() {
+    // An error recorded against a different source or id must not
+    // affect this item.
+    let item = unused("a", "docker");
+    let mut errors: BTreeMap<(String, String), String> = BTreeMap::new();
+    errors.insert(
+        ("ollama".to_string(), "a".to_string()),
+        "boom".to_string(),
+    );
+    assert!(item.is_deletable_for_real(&errors));
+
+    errors.clear();
+    errors.insert(
+        ("docker".to_string(), "b".to_string()),
+        "boom".to_string(),
+    );
+    assert!(item.is_deletable_for_real(&errors));
+}

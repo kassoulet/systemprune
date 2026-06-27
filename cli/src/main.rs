@@ -177,7 +177,11 @@ async fn main() -> ExitCode {
                     return ExitCode::from(1);
                 }
             }
-            let results = orchestrator.delete_many(&targets, true).await;
+            // The CLI is a one-shot tool with no concept of
+            // persistent failure tracking, so we pass `None` for
+            // `delete_errors` and rely on the per-item
+            // `is_safe_to_delete()` check.
+            let results = orchestrator.delete_many(&targets, true, None).await;
             let mut rc = 0;
             for r in &results {
                 if r.success {

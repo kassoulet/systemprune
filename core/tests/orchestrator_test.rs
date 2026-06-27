@@ -1,6 +1,7 @@
 //! Tests for the Orchestrator with stub scanners.
 
 use async_trait::async_trait;
+use std::collections::BTreeMap;
 use std::sync::{Arc, Mutex};
 use systemprune_core::errors::EngineError;
 use systemprune_core::models::{Category, Engine, PrunableItem, Status};
@@ -192,7 +193,7 @@ async fn delete_many_skips_active_by_default() {
         counter: counter.clone(),
     });
     let orch = Orchestrator::new(vec![docker]);
-    let results = orch.delete_many(&[active, safe], true).await;
+    let results = orch.delete_many(&[active, safe], true, None).await;
     assert_eq!(results.len(), 2);
     let successes: Vec<bool> = results.iter().map(|r| r.success).collect();
     assert_eq!(successes, vec![false, true]);
@@ -214,7 +215,7 @@ async fn delete_many_reports_per_item_failure() {
         counter: counter.clone(),
     });
     let orch = Orchestrator::new(vec![docker]);
-    let results = orch.delete_many(&[safe, bad], false).await;
+    let results = orch.delete_many(&[safe, bad], false, None).await;
     assert_eq!(results.len(), 2);
     for r in &results {
         assert!(!r.success);
@@ -223,6 +224,74 @@ async fn delete_many_reports_per_item_failure() {
     // The scanner was called for both items, but both failed.
     let calls = counter.0.lock().unwrap();
     assert_eq!(*calls, vec!["ok".to_string(), "bad".to_string()]);
+}
+
+#[tokio::test]
+async fn delete_many_mixed_results_carry_per_item_engine_error() {
+    // One scanner that fails every call; one that succeeds.  Each
+    // owns an item.  The orchestrator must report per-item
+    // success/failure and copy the scanner's `EngineError` into the
+    // failing `DeleteResult` so the UI can surface it to the user.
+    let ok = image("ok", Status::Unused);
+    let bad = PrunableItem {
+        id: "bad".into(),
+        name: "bad".into(),
+        engine: Engine::Ollama,
+        source: "ollama".into(),
+        category: Category::Model,
+        size_bytes: 4096,
+        status: Status::Unused,
+        extra: Default::default(),
+    };
+    let docker_counter = Arc::new(DeleteCounter::default());
+    let ollama_counter = Arc::new(DeleteCounter::default());
+    let docker: Arc<dyn Scanner> = Arc::new(StubScanner {
+        source: "docker",
+        engine: Engine::Docker,
+        items: vec![],
+        available: true,
+        delete_raises: false,
+        counter: docker_counter.clone(),
+    });
+    let ollama: Arc<dyn Scanner> = Arc::new(StubScanner {
+        source: "ollama",
+        engine: Engine::Ollama,
+        items: vec![],
+        available: true,
+        delete_raises: true,
+        counter: ollama_counter.clone(),
+    });
+    let orch = Orchestrator::new(vec![docker, ollama]);
+
+    let results = orch.delete_many(&[ok, bad], false, None).await;
+    assert_eq!(results.len(), 2);
+
+    // Order must match the input order.
+    assert!(results[0].success);
+    assert!(results[0].error.is_none());
+    assert_eq!(results[0].item.id, "ok");
+    // The successful item is reported in its pre-delete form so the
+    // UI can flip `Status::Deleted` on its own copy.
+    assert_eq!(results[0].item.status, Status::Unused);
+
+    assert!(!results[1].success);
+    let err = results[1]
+        .error
+        .as_ref()
+        .expect("failed delete carries an EngineError");
+    assert_eq!(err.engine, "ollama");
+    assert_eq!(err.returncode, Some(1));
+    assert!(err.message.contains("stub failure"));
+    // The original input is preserved; the orchestrator does not
+    // mutate it.
+    assert_eq!(results[1].item.id, "bad");
+    assert_eq!(results[1].item.status, Status::Unused);
+
+    // Both scanners were actually invoked.
+    let docker_calls = docker_counter.0.lock().unwrap();
+    let ollama_calls = ollama_counter.0.lock().unwrap();
+    assert_eq!(*docker_calls, vec!["ok".to_string()]);
+    assert_eq!(*ollama_calls, vec!["bad".to_string()]);
 }
 
 #[tokio::test]
@@ -246,7 +315,109 @@ async fn delete_many_no_scanner_for_source() {
         counter: Arc::new(DeleteCounter::default()),
     });
     let orch = Orchestrator::new(vec![docker]);
-    let results = orch.delete_many(&[item], false).await;
+    let results = orch.delete_many(&[item], false, None).await;
     assert!(!results[0].success);
     assert!(results[0].error.is_some());
+}
+
+#[tokio::test]
+async fn delete_many_rejects_items_in_delete_errors_map() {
+    // Defence-in-depth: a failed item that somehow slips past the
+    // UI's `is_deletable_for_real` filter (future code path, test
+    // injection, programmatic caller) must still be rejected by the
+    // orchestrator.  The scanner should never be invoked.
+    let item = image("bad", Status::Unused);
+    let counter = Arc::new(DeleteCounter::default());
+    let docker: Arc<dyn Scanner> = Arc::new(StubScanner {
+        source: "docker",
+        engine: Engine::Docker,
+        items: vec![],
+        available: true,
+        // The stub would *succeed* if called; the rejection must
+        // come from the orchestrator's delete_errors check, not the
+        // scanner.
+        delete_raises: false,
+        counter: counter.clone(),
+    });
+    let orch = Orchestrator::new(vec![docker]);
+    let mut delete_errors = BTreeMap::new();
+    delete_errors.insert(
+        ("docker".to_string(), "bad".to_string()),
+        "permission denied".to_string(),
+    );
+
+    let results = orch
+        .delete_many(&[item], true, Some(&delete_errors))
+        .await;
+    assert_eq!(results.len(), 1);
+    assert!(!results[0].success);
+    let err = results[0]
+        .error
+        .as_ref()
+        .expect("rejected item carries an EngineError");
+    assert!(err.message.contains("previously failed"));
+    assert_eq!(err.engine, "docker");
+    // The original input is preserved.
+    assert_eq!(results[0].item.id, "bad");
+    assert_eq!(results[0].item.status, Status::Unused);
+    // The scanner was *not* called for the rejected item.
+    let calls = counter.0.lock().unwrap();
+    assert!(calls.is_empty(), "scanner must not be invoked for rejected items");
+}
+
+#[tokio::test]
+async fn delete_many_delete_errors_only_blocks_matching_keys() {
+    // An item with the same source but a different id, or a
+    // different source with the same id, must not be blocked.
+    let matched = image("bad", Status::Unused);
+    let same_source = image("other", Status::Unused);
+    let different_source = PrunableItem {
+        id: "bad".into(),
+        name: "bad".into(),
+        engine: Engine::Ollama,
+        source: "ollama".into(),
+        category: Category::Model,
+        size_bytes: 1024,
+        status: Status::Unused,
+        extra: Default::default(),
+    };
+    let counter = Arc::new(DeleteCounter::default());
+    let docker: Arc<dyn Scanner> = Arc::new(StubScanner {
+        source: "docker",
+        engine: Engine::Docker,
+        items: vec![],
+        available: true,
+        delete_raises: false,
+        counter: counter.clone(),
+    });
+    let orch = Orchestrator::new(vec![docker]);
+    let mut delete_errors = BTreeMap::new();
+    delete_errors.insert(
+        ("docker".to_string(), "bad".to_string()),
+        "boom".to_string(),
+    );
+
+    let results = orch
+        .delete_many(&[matched, same_source, different_source], true, Some(&delete_errors))
+        .await;
+    assert_eq!(results.len(), 3);
+    // `matched` is blocked: its `(docker, "bad")` key matches an
+    // entry in `delete_errors` exactly.
+    assert!(!results[0].success);
+    assert!(results[0].error.as_ref().unwrap().message.contains("previously failed"));
+    // `same_source` is docker with id="other" \u2014 not in
+    // `delete_errors`, so the tie-breaker does not fire. The
+    // orchestrator dispatches it to the docker scanner, which
+    // succeeds (`delete_raises=false`).
+    assert!(results[1].success);
+    assert!(results[1].error.is_none());
+    // `different_source` is ollama with id="bad" \u2014 not in
+    // `delete_errors` either, but the orchestrator has no ollama
+    // scanner, so it falls through to the "No active scanner" path.
+    assert!(!results[2].success);
+    assert!(results[2].error.as_ref().unwrap().message.contains("No active scanner"));
+    // The scanner was invoked exactly once, for the non-blocked
+    // docker item.
+    let calls = counter.0.lock().unwrap();
+    assert_eq!(*calls, vec!["other".to_string()]);
 }

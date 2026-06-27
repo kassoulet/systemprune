@@ -2,14 +2,18 @@
 
 A unified, user-friendly Linux disk space cleaner for modern developer
 environments. SystemPrune wraps the native CLI tools for **Docker**,
-**Podman**, **Flatpak**, **Snap**, and **Ollama**, providing a single
-interface to analyze disk usage and safely clean up unused assets.
+**Podman**, **Flatpak**, **Snap**, and **Ollama**, plus a set of
+filesystem-aware scanners for **Node Modules**, **Python venvs**,
+**Tox**, and **Mypy** caches. All of them are surfaced through a
+single interface that analyzes disk usage and safely cleans up
+unused assets.
 
 ## Features
 
 - **Read-only analysis** — parses native CLI output (preferring JSON) to
   build a unified list of deletable assets with sizes and status.
-- **Multi-engine** — Docker, Podman, Flatpak, Snap, and Ollama.
+- **Multi-engine** — Docker, Podman, Flatpak, Snap, Ollama, Node
+  Modules, Python venvs, Tox, Mypy.
 - **Safety guardrails** — never deletes active containers, running
   Flatpaks/Snaps, or models currently in use.
 - **PATH probing** — engines whose CLI is not installed are silently
@@ -22,13 +26,14 @@ interface to analyze disk usage and safely clean up unused assets.
 
 ## Workspace layout
 
-This is a Cargo workspace with three members:
+This is a Cargo workspace with four members:
 
 | Crate        | Type   | Purpose                                          |
 | ------------ | ------ | ------------------------------------------------ |
 | `core`       | lib    | Engine-agnostic models, parsers, scanners        |
+| `cli`        | bin    | Non-interactive command-line interface (`systemprune`) |
 | `tui`        | bin    | Ratatui terminal UI                              |
-| `gui`        | bin    | GTK4 desktop UI (gtk4-rs)                        |
+| `gui`        | bin    | GTK4 desktop UI (gtk4-rs + libadwaita)           |
 
 All scanners and the orchestrator live in `core` and are reused by
 both the TUI and the GUI.
@@ -123,29 +128,45 @@ core/src/
 ├── orchestrator.rs     # Concurrent scanning & batched deletion
 ├── errors.rs           # Error types
 └── scanners/
-    ├── mod.rs          # ALL_SCANNERS list
-    ├── base.rs         # Scanner trait
+    ├── mod.rs          # all_scanners() registry
+    ├── base.rs         # BaseScanner + shared subprocess helpers
+    ├── fs_scan.rs      # Shared directory-walking helpers (find_dirs_named, …)
     ├── docker.rs
     ├── podman.rs
     ├── flatpak.rs
     ├── snap.rs
-    └── ollama.rs
+    ├── ollama.rs
+    ├── node_modules.rs # Walks $HOME for `node_modules/` dirs
+    ├── python_venv.rs  # Walks $HOME for Python venvs (.venv, venv, …)
+    ├── tox.rs          # Walks $HOME for `.tox/` dirs
+    └── mypy.rs         # Walks $HOME for `.mypy_cache/` dirs
 ```
 
 ### The `Scanner` trait
 
-Every scanner implements three methods:
+Every scanner implements six methods:
 
 ```rust
 #[async_trait]
 pub trait Scanner: Send + Sync {
+    /// Stable source name (e.g. "docker", "node_modules").
     fn source(&self) -> &'static str;
+    /// Native engine this scanner wraps.
     fn engine(&self) -> Engine;
-    fn is_available(&self) -> bool;
+    /// CLI binary on $PATH; used by the default `is_available`.
+    fn binary(&self) -> &'static str;
+    /// Returns `true` if the binary is on $PATH (default impl uses `which`).
+    fn is_available(&self) -> bool { /* ... */ }
+    /// Enumerate the prunable items this engine exposes.
     async fn get_items(&self) -> Result<Vec<PrunableItem>, EngineError>;
+    /// Delete a single item via the engine's native CLI.
     async fn delete_item(&self, item: &PrunableItem) -> Result<(), EngineError>;
 }
 ```
+
+`is_available` has a default implementation that consults `which::which(self.binary())`,
+so scanners that do nothing else (the dev-tool directory-walk scanners
+in particular) only need to provide the other five.
 
 ### Safety
 

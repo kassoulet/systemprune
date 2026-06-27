@@ -28,6 +28,24 @@ use systemprune_core::size::format_size;
 
 type TerminalType = ratatui::Terminal<ratatui::backend::CrosstermBackend<Stdout>>;
 
+/// Per-item display description produced by `App::describe_item_row`.
+/// Extracted so unit tests can verify the contract of the
+/// `delete_errors` map without rendering a frame.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct ItemRowRender {
+    pub mark: &'static str,
+    pub name: String,
+    pub color: ItemRowColor,
+    pub italic: bool,
+}
+
+/// Foreground colour hint for a rendered item row.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum ItemRowColor {
+    Default,
+    Red,
+}
+
 /// One row in the flat display list: either a group header or a
 /// reference to an item in `App::items`.
 #[derive(Debug, Clone)]
@@ -77,6 +95,45 @@ impl App {
             sidebar_area: Rect::default(),
             quit: false,
             delete_errors: BTreeMap::new(),
+        }
+    }
+
+    /// Per-item display description. Extracted from `draw_table`
+    /// so unit tests can pin the contract without rendering a
+    /// frame.
+    pub(crate) fn describe_item_row(&self, item: &PrunableItem) -> ItemRowRender {
+        let key = (item.source.clone(), item.id.clone());
+        let has_error = self.delete_errors.contains_key(&key);
+        let mark = if item.status.is_deleted() {
+            "\u{2717}"
+        } else if has_error {
+            "\u{2716}"
+        } else if !item.is_safe_to_delete() {
+            "\u{1f512}"
+        } else if self.selected.contains(&key) {
+            "x"
+        } else {
+            " "
+        };
+        let name = if item.status.is_deleted() {
+            format!("{} (deleted)", item.name)
+        } else if has_error {
+            format!("{} (failed)", item.name)
+        } else {
+            item.name.clone()
+        };
+        let (color, italic) = if item.status.is_deleted() {
+            (ItemRowColor::Default, true)
+        } else if has_error {
+            (ItemRowColor::Red, false)
+        } else {
+            (ItemRowColor::Default, false)
+        };
+        ItemRowRender {
+            mark,
+            name,
+            color,
+            italic,
         }
     }
 
@@ -220,22 +277,31 @@ impl App {
     }
 
     fn update_cursor_status(&mut self) {
+        self.status = self.cursor_info();
+    }
+
+    /// Pure description of the current cursor row. Extracted from
+    /// `update_cursor_status` so unit tests can pin the contract
+    /// without rendering a frame.
+    pub(crate) fn cursor_info(&self) -> String {
         match self.cursor_row() {
             Some(DisplayRow::Item(idx)) => {
                 let item = &self.items[*idx];
                 let key = (item.source.clone(), item.id.clone());
                 if let Some(err) = self.delete_errors.get(&key) {
-                    self.status = format!("Error: {}", err);
+                    format!("Error: {}", err)
                 } else if let Some(path) = item.extra.get("path") {
-                    self.status = path.clone();
+                    path.clone()
                 } else if let Some(root) = item.extra.get("project_root") {
-                    self.status = format!("{} ({})", item.name, root);
+                    format!("{} ({})", item.name, root)
+                } else {
+                    String::new()
                 }
             }
             Some(DisplayRow::Group { category, count, .. }) => {
-                self.status = format!("{} \u{2014} {} item(s)", category.plural_label(), count);
+                format!("{} \u{2014} {} item(s)", category.plural_label(), count)
             }
-            None => {}
+            None => String::new(),
         }
     }
 
@@ -243,7 +309,7 @@ impl App {
         let all_keys: HashSet<(String, String)> = self
             .items
             .iter()
-            .filter(|i| i.is_safe_to_delete())
+            .filter(|i| i.is_deletable_for_real(&self.delete_errors))
             .map(|i| (i.source.clone(), i.id.clone()))
             .collect();
         if self.selected == all_keys {
@@ -269,11 +335,11 @@ impl App {
         let safe_keys: HashSet<(String, String)> = self
             .items
             .iter()
-            .filter(|i| i.category == cat && i.is_safe_to_delete())
+            .filter(|i| i.category == cat && i.is_deletable_for_real(&self.delete_errors))
             .map(|i| (i.source.clone(), i.id.clone()))
             .collect();
         if safe_keys.is_empty() {
-            self.status = format!("No safe items in {}.", cat.plural_label());
+            self.status = format!("No deletable items in {}.", cat.plural_label());
             return;
         }
         if safe_keys.is_subset(&self.selected) {
@@ -296,8 +362,15 @@ impl App {
             _ => return,
         };
         let item = &self.items[idx];
-        if !item.is_safe_to_delete() {
-            self.status = format!("Cannot toggle: {} is active.", item.name);
+        if !item.is_deletable_for_real(&self.delete_errors) {
+            self.status = if !item.is_safe_to_delete() {
+                format!("Cannot toggle: {} is active.", item.name)
+            } else {
+                format!(
+                    "Cannot toggle: {} previously failed to delete.",
+                    item.name
+                )
+            };
             return;
         }
         let key = (item.source.clone(), item.id.clone());
@@ -396,7 +469,7 @@ impl App {
             .iter()
             .filter(|i| {
                 self.selected.contains(&(i.source.clone(), i.id.clone()))
-                    && i.is_safe_to_delete()
+                    && i.is_deletable_for_real(&self.delete_errors)
             })
             .cloned()
             .collect();
@@ -405,7 +478,10 @@ impl App {
             self.status = "No items to delete.".to_string();
             return;
         }
-        let results = self.orchestrator.delete_many(&to_delete, true).await;
+        let results = self
+            .orchestrator
+            .delete_many(&to_delete, true, Some(&self.delete_errors))
+            .await;
         let ok = results.iter().filter(|r| r.success).count();
         let fail = results.len() - ok;
         for r in &results {
@@ -562,39 +638,18 @@ fn draw_table(f: &mut ratatui::Frame, app: &mut App, area: Rect) {
             }
             DisplayRow::Item(idx) => {
                 let item = &app.items[*idx];
-                let key = (item.source.clone(), item.id.clone());
-                let has_error = app.delete_errors.contains_key(&key);
-                let mark = if item.status.is_deleted() {
-                    "\u{2717}"
-                } else if has_error {
-                    "\u{2716}"
-                } else if !item.is_safe_to_delete() {
-                    "\u{1f512}"
-                } else if app.selected.contains(&key) {
-                    "x"
-                } else {
-                    " "
-                };
-                let name = if item.status.is_deleted() {
-                    format!("{} (deleted)", item.name)
-                } else if has_error {
-                    format!("{} (failed)", item.name)
-                } else {
-                    item.name.clone()
-                };
-                let style = if item.status.is_deleted() {
-                    Style::default().add_modifier(Modifier::ITALIC)
-                } else if has_error {
-                    Style::default().fg(Color::Red)
-                } else {
-                    Style::default()
+                let render = app.describe_item_row(item);
+                let style = match (render.color, render.italic) {
+                    (ItemRowColor::Default, false) => Style::default(),
+                    (ItemRowColor::Default, true) => Style::default().add_modifier(Modifier::ITALIC),
+                    (ItemRowColor::Red, _) => Style::default().fg(Color::Red),
                 };
                 Row::new(vec![
-                    Cell::from(mark),
+                    Cell::from(render.mark),
                     Cell::from(item.category.plural_label().to_string()),
                     Cell::from(item.status.as_str().to_string()),
                     Cell::from(format_size(item.size_bytes as i64, true)),
-                    Cell::from(name),
+                    Cell::from(render.name),
                 ]).style(style)
             }
         })
@@ -634,4 +689,232 @@ fn draw_status(f: &mut ratatui::Frame, status: &str, area: Rect) {
     let widget = Paragraph::new(Line::from(Span::raw(status)))
         .block(Block::default().borders(Borders::TOP));
     f.render_widget(widget, area);
+}
+
+// ---------------------------------------------------------------------------
+// Tests
+// ---------------------------------------------------------------------------
+
+#[cfg(test)]
+mod tests {
+    //! Unit tests for the deletion-error tracking contract.
+    //!
+    //! The render path in `draw_table` is a thin wrapper around
+    //! `App::describe_item_row`; these tests pin the contract of
+    //! that helper (and `cursor_info`) so future refactors cannot
+    //! silently break the surface of failed deletions.
+
+    use super::*;
+    use systemprune_core::models::Engine;
+
+    fn make_item(id: &str, source: &str, status: Status, category: Category) -> PrunableItem {
+        let engine = match source {
+            "docker" => Engine::Docker,
+            "ollama" => Engine::Ollama,
+            _ => Engine::Docker,
+        };
+        PrunableItem {
+            id: id.to_string(),
+            name: id.to_string(),
+            engine,
+            source: source.to_string(),
+            category,
+            size_bytes: 1024,
+            status,
+            extra: Default::default(),
+        }
+    }
+
+    /// Build an `App` with no real scanners. The render-decision
+    /// helpers do not touch the orchestrator, so this is sufficient.
+    fn empty_app() -> App {
+        App {
+            orchestrator: Orchestrator::new(vec![]),
+            items: Vec::new(),
+            selected: HashSet::new(),
+            table_state: TableState::default(),
+            status: String::new(),
+            busy: false,
+            collapsed: HashSet::new(),
+            display_rows: Vec::new(),
+            sidebar_area: Rect::default(),
+            quit: false,
+            delete_errors: BTreeMap::new(),
+        }
+    }
+
+    #[test]
+    fn describe_item_row_unselected_safe_uses_blank_mark() {
+        let mut app = empty_app();
+        let item = make_item("a", "docker", Status::Unused, Category::Image);
+        app.items.push(item.clone());
+        let render = app.describe_item_row(&item);
+        assert_eq!(render.mark, " ");
+        assert_eq!(render.name, "a");
+        assert_eq!(render.color, ItemRowColor::Default);
+        assert!(!render.italic);
+    }
+
+    #[test]
+    fn describe_item_row_selected_safe_uses_x_mark() {
+        let mut app = empty_app();
+        let item = make_item("a", "docker", Status::Unused, Category::Image);
+        app.items.push(item.clone());
+        app.selected
+            .insert((item.source.clone(), item.id.clone()));
+        let render = app.describe_item_row(&item);
+        assert_eq!(render.mark, "x");
+        assert_eq!(render.name, "a");
+    }
+
+    #[test]
+    fn describe_item_row_active_uses_lock_mark() {
+        let mut app = empty_app();
+        let item = make_item("a", "docker", Status::Active, Category::Image);
+        app.items.push(item.clone());
+        let render = app.describe_item_row(&item);
+        assert_eq!(render.mark, "\u{1f512}");
+    }
+
+    #[test]
+    fn describe_item_row_deleted_uses_x_mark_and_italic_and_suffix() {
+        let mut app = empty_app();
+        let item = make_item("a", "docker", Status::Deleted, Category::Image);
+        app.items.push(item.clone());
+        let render = app.describe_item_row(&item);
+        assert_eq!(render.mark, "\u{2717}");
+        assert_eq!(render.name, "a (deleted)");
+        assert_eq!(render.color, ItemRowColor::Default);
+        assert!(render.italic);
+    }
+
+    #[test]
+    fn describe_item_row_with_delete_error_uses_failed_mark_and_red() {
+        let mut app = empty_app();
+        let item = make_item("a", "docker", Status::Unused, Category::Image);
+        app.items.push(item.clone());
+        app.delete_errors.insert(
+            (item.source.clone(), item.id.clone()),
+            "boom".to_string(),
+        );
+        let render = app.describe_item_row(&item);
+        assert_eq!(render.mark, "\u{2716}");
+        assert_eq!(render.name, "a (failed)");
+        assert_eq!(render.color, ItemRowColor::Red);
+        assert!(!render.italic);
+    }
+
+    #[test]
+    fn describe_item_row_error_takes_precedence_over_selection() {
+        // Selection is a non-destructive intent; a failed delete
+        // should keep surfacing the error to the user.
+        let mut app = empty_app();
+        let item = make_item("a", "docker", Status::Unused, Category::Image);
+        app.items.push(item.clone());
+        app.selected
+            .insert((item.source.clone(), item.id.clone()));
+        app.delete_errors.insert(
+            (item.source.clone(), item.id.clone()),
+            "boom".to_string(),
+        );
+        let render = app.describe_item_row(&item);
+        assert_eq!(render.mark, "\u{2716}");
+        assert_eq!(render.name, "a (failed)");
+        assert_eq!(render.color, ItemRowColor::Red);
+    }
+
+    #[test]
+    fn describe_item_row_deleted_status_wins_over_error() {
+        // A re-scan after a failed delete may or may not keep the
+        // previous error; if the item somehow has both, the
+        // Status::Deleted display (italic, ✗) is unambiguous and
+        // wins, matching the pre-error-tracking behaviour.
+        let mut app = empty_app();
+        let item = make_item("a", "docker", Status::Deleted, Category::Image);
+        app.items.push(item.clone());
+        app.delete_errors.insert(
+            (item.source.clone(), item.id.clone()),
+            "boom".to_string(),
+        );
+        let render = app.describe_item_row(&item);
+        assert_eq!(render.mark, "\u{2717}");
+        assert_eq!(render.name, "a (deleted)");
+        assert!(render.italic);
+    }
+
+    // --- cursor_info ---
+
+    #[test]
+    fn cursor_info_on_item_with_delete_error_formats_error_prefix() {
+        let mut app = empty_app();
+        let item = make_item("a", "docker", Status::Unused, Category::Image);
+        app.items.push(item);
+        app.display_rows.push(DisplayRow::Item(0));
+        app.table_state.select(Some(0));
+        app.delete_errors
+            .insert(("docker".to_string(), "a".to_string()), "boom".to_string());
+        assert_eq!(app.cursor_info(), "Error: boom");
+    }
+
+    #[test]
+    fn cursor_info_on_item_with_path_uses_path() {
+        let mut app = empty_app();
+        let mut item = make_item("a", "docker", Status::Unused, Category::Image);
+        item.extra
+            .insert("path".to_string(), "/some/path".to_string());
+        app.items.push(item);
+        app.display_rows.push(DisplayRow::Item(0));
+        app.table_state.select(Some(0));
+        assert_eq!(app.cursor_info(), "/some/path");
+    }
+
+    #[test]
+    fn cursor_info_on_item_with_project_root_uses_name_root() {
+        let mut app = empty_app();
+        let mut item = make_item("a", "docker", Status::Unused, Category::Image);
+        item.extra
+            .insert("project_root".to_string(), "/proj".to_string());
+        app.items.push(item);
+        app.display_rows.push(DisplayRow::Item(0));
+        app.table_state.select(Some(0));
+        assert_eq!(app.cursor_info(), "a (/proj)");
+    }
+
+    #[test]
+    fn cursor_info_on_group_uses_plural_label_and_count() {
+        let mut app = empty_app();
+        app.items
+            .push(make_item("a", "docker", Status::Unused, Category::Image));
+        app.display_rows.push(DisplayRow::Group {
+            category: Category::Image,
+            count: 1,
+            total_size: 1024,
+            sel_count: 0,
+            sel_size: 0,
+            safe_count: 1,
+            collapsed: false,
+        });
+        app.table_state.select(Some(0));
+        assert_eq!(app.cursor_info(), "Docker Images \u{2014} 1 item(s)");
+    }
+
+    #[test]
+    fn cursor_info_with_no_selection_is_empty() {
+        let app = empty_app();
+        assert_eq!(app.cursor_info(), "");
+    }
+
+    #[test]
+    fn cursor_info_error_takes_precedence_over_path() {
+        let mut app = empty_app();
+        let mut item = make_item("a", "docker", Status::Unused, Category::Image);
+        item.extra
+            .insert("path".to_string(), "/some/path".to_string());
+        app.items.push(item);
+        app.display_rows.push(DisplayRow::Item(0));
+        app.table_state.select(Some(0));
+        app.delete_errors
+            .insert(("docker".to_string(), "a".to_string()), "boom".to_string());
+        assert_eq!(app.cursor_info(), "Error: boom");
+    }
 }

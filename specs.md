@@ -4,7 +4,7 @@ This spec provides a clear roadmap for building the orchestrator and the fronten
 
 ## 1. Executive Summary
 
-**SystemPrune** is a unified, user-friendly Linux disk space cleaner focused specifically on modern developer environments and container runtimes. It provides an abstraction layer over disparate CLI tools (Docker, Podman, Flatpak, Snap, Ollama) to safely analyze disk usage and execute cleanup commands without risking data corruption or requiring manual terminal navigation.
+**SystemPrune** is a unified, user-friendly Linux disk space cleaner focused specifically on modern developer environments and container runtimes. It provides an abstraction layer over disparate CLI tools (Docker, Podman, Flatpak, Snap, Ollama) and a set of filesystem-aware scanners (Node Modules, Python venvs, Tox, Mypy caches) to safely analyze disk usage and execute cleanup commands without risking data corruption or requiring manual terminal navigation.
 
 ## 2. Core Features
 
@@ -33,7 +33,7 @@ Rust creates a single, self-contained binary with strict memory safety and excel
 | --- | --- | --- |
 | **Backend Logic** | Rust | `std::process::Command` for execution, `serde_json` for parsing. |
 | **TUI Frontend** | Ratatui | Extremely fast, reliable terminal interface library. |
-| **GUI Frontend** | Tauri 2 | Allows building the UI with Web Tech (HTML/Tailwind) while using the Rust backend for system commands. |
+| **GUI Frontend** | gtk4-rs + libadwaita | Native GTK4 / libadwaita window using the same Rust backend; renders the same grouped-by-type view as the TUI. |
 | **Distribution** | Cargo / Distro Repos | Single binary distribution is trivial. |
 
 ---
@@ -44,10 +44,31 @@ Each module must implement a standard interface so the Core Orchestrator can han
 
 ### The `BaseScanner` Interface
 
-Every module must expose two primary methods:
+Every module implements a single Rust trait so the Core Orchestrator
+can handle them generically. The trait exposes six methods:
 
-1. `get_items() -> List[PrunableItem]`
-2. `delete_item(id: str) -> Result<Success, Error>`
+```rust
+#[async_trait]
+pub trait Scanner: Send + Sync {
+    /// Stable source name (e.g. "docker", "node_modules").
+    fn source(&self) -> &'static str;
+    /// Native engine this scanner wraps.
+    fn engine(&self) -> Engine;
+    /// CLI binary on $PATH; used by the default `is_available`.
+    fn binary(&self) -> &'static str;
+    /// Returns `true` if the binary is on $PATH (default impl uses `which`).
+    fn is_available(&self) -> bool { /* ... */ }
+    /// Enumerate the prunable items this engine exposes.
+    async fn get_items(&self) -> Result<Vec<PrunableItem>, EngineError>;
+    /// Delete a single item via the engine's native CLI.
+    async fn delete_item(&self, item: &PrunableItem) -> Result<(), EngineError>;
+}
+```
+
+`is_available` has a default implementation that consults
+`which::which(self.binary())`, so scanners that have no CLI
+binary to probe (the dev-tool directory-walk scanners in
+particular) only need to provide the other five.
 
 ### Example Implementation Data Models (JSON Output Targets)
 

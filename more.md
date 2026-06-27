@@ -32,6 +32,8 @@ biggest offenders.
 
 ### 1.2 Package manager caches
 
+*Status: future work (not yet implemented.)*
+
 | Engine     | Probe command        | Delete command            | Source      |
 | ---------- | -------------------- | ------------------------- | ----------- |
 | `apt`      | `apt-get --version`  | `apt-get clean`           | `apt`       |
@@ -40,36 +42,43 @@ biggest offenders.
 | `zypper`   | `zypper --version`   | `zypper clean -a`         | `zypper`    |
 
 * Size reported via `du -sb /var/cache/{apt,dnf,pacman,zypp}`.
-* Reported as a single `Category::Cache` item per manager; deleting
-  the cache item runs the appropriate `* clean` command.
+* Will be reported as a single `Category::DependencyCache` item per
+  manager; deleting the cache item runs the appropriate `* clean`
+  command.
 
 ### 1.3 Developer-tool caches
 
-| Tool      | Delete command            | Notes                                |
-| --------- | ------------------------- | ------------------------------------ |
-| `npm`     | `npm cache clean --force` | Uses `~/.npm`; size from `du`.       |
-| `yarn`    | `yarn cache clean`        | Yarn classic.                        |
-| `pnpm`    | `pnpm store prune`        |                                      |
-| `pip`     | `pip cache purge`         |                                      |
-| `poetry`  | `poetry cache clear --all`|                                      |
-| `cargo`   | `cargo clean`             | Per-project; not aggregated.         |
-| `go`      | `go clean -modcache`      |                                      |
-| `gradle`  | `rm -rf ~/.gradle/caches` | Configurable: keep recent versions.  |
+*Status: implemented in `core` and shipped by `systemprune-tui` /
+`systemprune-gui` / `systemprune`. The scanners walk `$HOME` and
+surface each cache as a discrete item.*
 
-* Source: tool name (`npm`, `cargo`, …).
-* Category: `cache`.
-* **Safety:** None of these are "active" in the sense of running
-  processes, so they are always safe to delete — but some
-  (e.g. cargo) invalidate build artifacts. Mark with a `caution`
-  flag that the UI surfaces as a yellow warning.
+| Scanner        | Source         | What it finds                                     | `Category`            |
+| -------------- | -------------- | ------------------------------------------------- | --------------------- |
+| `NodeModules`  | `node_modules` | `node_modules/` directories (npm, yarn, pnpm)     | `Category::NodeModules` |
+| `PythonVenv`   | `python_venv`  | Python virtualenvs (`.venv/`, `venv/`, …)         | `Category::PythonVenv`  |
+| `Tox`          | `tox`          | `.tox/` directories created by the `tox` runner   | `Category::DependencyCache` |
+| `Mypy`         | `mypy`         | `.mypy_cache/` directories created by `mypy`      | `Category::DependencyCache` |
+
+* **Safety:** None of these are “active” in the sense of running
+  processes, so they are always safe to delete. Some invalidate
+  build artifacts (a fresh `npm install` / `mypy` re-run is
+  required); the TUI/GUI surface this via the standard
+  `is_safe_to_delete() == true` semantic rather than a separate
+  “caution” flag.
+* Per-item `extra` metadata:
+  * `path` — absolute path of the cache directory.
+  * `project_root` — the parent project the cache belongs to
+    (used by the TUI status bar to give context).
 
 ### 1.4 Browser / thumbnail caches
+
+*Status: future work (not yet implemented.)*
 
 * `~/.cache/google-chrome/Default/Cache`
 * `~/.cache/thumbnails/`
 * `~/.cache/mozilla/firefox/*/cache2/`
 * Source: `thumbnails`, `chromium`, `firefox`.
-* Category: `cache`.
+* Category: `Category::DependencyCache`.
 * Safety: always safe (rebuilt on demand).
 
 ---
@@ -249,14 +258,17 @@ version = 1
 
 # Per-engine enable/disable (overrides PATH probe)
 [engines]
-docker   = true
-podman   = true
-flatpak  = true
-snap     = true
-ollama   = true
-apt      = true
-dnf      = false
-npm      = true
+docker         = true
+podman         = true
+flatpak        = true
+snap           = true
+ollama         = true
+node_modules   = true
+python_venv    = true
+tox            = true
+mypy           = true
+apt            = true   # future
+dnf            = false  # future
 
 # Default sort order for list / dashboard
 sort = "size"     # one of: size, name, age, source
@@ -386,11 +398,12 @@ human-friendly formatting, suitable for cron logs and CI.
 
 ## 10. Phased rollout
 
-| Phase | Features                              | Target  |
-| ----- | ------------------------------------- | ------- |
-| 1     | §2.1 `prune`, §2.3 `--dry-run`, §3.1  | MVP     |
-| 2     | §1.1 journald, §1.2 package caches    | v0.2    |
-| 3     | §4 dashboard, §5 history              | v0.3    |
-| 4     | §1.3 dev-tool caches, §6 config        | v0.4    |
-| 5     | §7 timer, §8 notifications            | v0.5    |
-| 6     | §1.4 browser caches, §2.2 engine prunes | v0.6   |
+| Phase | Features                              | Target  | Status      |
+| ----- | ------------------------------------- | ------- | ----------- |
+| 1     | §2.1 `prune`, §2.3 `--dry-run`, §3.1  | MVP     | shipped     |
+| 1.5   | §1.3 dev-tool caches (Node Modules, Python venv, Tox, Mypy) | 0.1.0 | shipped |
+| 2     | §1.1 journald, §1.2 package caches    | v0.2    | planned     |
+| 3     | §4 dashboard, §5 history              | v0.3    | planned     |
+| 4     | §6 config                              | v0.4    | planned     |
+| 5     | §7 timer, §8 notifications            | v0.5    | planned     |
+| 6     | §1.4 browser caches, §2.2 engine prunes | v0.6   | planned     |

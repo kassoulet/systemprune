@@ -37,7 +37,9 @@ Initial release of the Rust workspace.
 ### Added
 - Workspace crates: `core` (library), `systemprune` (CLI), `systemprune-tui`
   (Ratatui terminal UI), `systemprune-gui` (gtk4-rs GTK4 desktop UI).
-- Scanners: Docker, Podman, Flatpak, Snap, Ollama.
+- Scanners: Docker, Podman, Flatpak, Snap, Ollama, Node Modules
+  (`node_modules` directories), Python venvs, Tox (`.tox/`
+  directories), Mypy (`.mypy_cache/` directories).
 - `Scanner` trait with `get_items` / `delete_item` / `is_available` /
   `source` / `engine` / `binary`.
 - `Orchestrator` with concurrent `scan_all` (tokio `JoinSet`) and

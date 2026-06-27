@@ -183,6 +183,24 @@ impl PrunableItem {
         !self.status.is_active() && !self.status.is_deleted()
     }
 
+    /// Whether this item is *currently* safe to delete, taking the
+    /// UI's record of recent deletion failures into account.
+    ///
+    /// An item with `Status::Unused` (i.e. `is_safe_to_delete() == true`)
+    /// is *not* re-deletable if a previous attempt on it has already
+    /// failed and the failure is still recorded in `delete_errors`.
+    /// This keeps the TUI/GUI from re-queueing items the engine has
+    /// already rejected, which would either repeat the failure
+    /// (waste of time) or, in the worst case, cause data loss if the
+    /// user didn't realise the item was already on a deny-list.
+    pub fn is_deletable_for_real(
+        &self,
+        delete_errors: &std::collections::BTreeMap<(String, String), String>,
+    ) -> bool {
+        self.is_safe_to_delete()
+            && !delete_errors.contains_key(&(self.source.clone(), self.id.clone()))
+    }
+
     /// Return a JSON-serialisable view of this item. Mirrors the
     /// Python `PrunableItem.as_dict()` so CLI ``--json`` output
     /// matches across stacks.
