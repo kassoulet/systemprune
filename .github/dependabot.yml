@@ -1,0 +1,104 @@
+# Dependabot configuration for the SystemPrune workspace.
+#
+# Goal: keep the four Rust crates (`core`, `cli`, `tui`, `gui`) and
+# the four GitHub Actions in `.github/workflows/ci.yml` on a
+# predictable, weekly update cadence with **grouped PRs** so:
+#
+#   * Cargo direct-dependency bumps arrive in one PR, transitive
+#     bumps in another — a reader can scan the monthly timestamp of
+#     a single CLI subcommand's dep change without scrolling through
+#     14 transitive `aws-sdk-*` bumps.
+#   * GitHub Actions bumps are split by ecosystem: the rust
+#     toolchain chain (rust-toolchain action, rustfmt + clippy
+#     components surfaced via `Swatinem/rust-cache`, etc.) bumps
+#     together in its own PR; non-rust actions (`actions/checkout`
+#     and friends) bump in a separate PR with a different label.
+#
+# Pairs with `.github/workflows/ci.yml`: every Dependabot PR runs
+# the same `fmt + clippy + build + test` gate, so a non-breaking
+# bump merges automatically and a breaking bump fails CI and tells
+# the contributor exactly which crate is the bottleneck.
+
+version: 2
+
+updates:
+  # ----- Cargo ecosystem ---------------------------------------------
+  - package-ecosystem: "cargo"
+    directory: "/"
+    # Monday weekly — Dependabot ranks Monday PRs alphabetically
+    # before Tuesday's, so cargo + actions updates can't land the
+    # same commit window and CSR-bot reviews them in a predictable
+    # order.
+    schedule:
+      interval: "weekly"
+      day: "monday"
+    # Open up to 10 concurrent PRs so a big transitive-bump week
+    # doesn't write a single 200-file PR — easier to review each
+    # crate's delta in isolation. The limit prevents storms where
+    # a new 1.x release sends every direct dep bumping in a loop.
+    open-pull-requests-limit: 10
+    labels:
+      - "dependencies"
+      - "rust"
+    commit-message:
+      prefix: "cargo"
+      # `include: "scope"` puts the crate name (e.g. `cli`) into
+      # the commit subject so `git log --grep='cargo'` shows
+      # which subcrate drove the bump.
+      include: "scope"
+    groups:
+      direct-dependencies:
+        # Direct-only PRs. The reviewer can audit a single line of
+        # `Cargo.toml` to understand the change without scanning
+        # transitive resolution graphs.
+        dependency-type: "direct"
+        patterns:
+          - "*"
+      transitive-dependencies:
+        # All indirect deps land in one PR; reviewers sanity-check
+        # it runs green on CI then merge. No patterns filter so
+        # global.
+        dependency-type: "indirect"
+        patterns:
+          - "*"
+    # Limit the blast radius of security bumps: Dependabot opens
+    # urgent security PRs immediately (overrides the weekly
+    # cadence) for any direct dep. Transitive security bumps are
+    # raised via Dependabot's auto-merge flow rather than as
+    # weekly PRs.
+    # (No `ignore` entries — we want to see every dep.)
+
+  # ----- GitHub Actions ecosystem ------------------------------------
+  - package-ecosystem: "github-actions"
+    directory: "/"
+    # Tuesday weekly — one day after cargo so a Monday-bumped Rust
+    # toolchain doesn't collide with Tuesday's action bumps and
+    # the CSR bot can review them sequentially.
+    schedule:
+      interval: "weekly"
+      day: "tuesday"
+    open-pull-requests-limit: 5
+    labels:
+      - "dependencies"
+      - "ci"
+    commit-message:
+      prefix: "ci"
+      include: "scope"
+    groups:
+      # All rust-toolchain-chained actions bump together. Reviewer
+      # sees a single PR labelled `dependencies, ci, rust` that
+      # upgrades, e.g., `dtolnay/rust-toolchain` + `Swatinem/rust-cache`
+      # in lockstep — important because a cache-format change in
+      # `Swatinem/rust-cache` can interact with a toolchain bump.
+      rust-toolchain:
+        patterns:
+          - "dtolnay/rust-toolchain*"
+          - "Swatinem/rust-cache"
+      # Everything else (`actions/checkout`, `setup-*`, ...) gets
+      # its own PR. Splitting rust and non-rust bumps means a
+      # pre-existing `actions/checkout` CVE fix doesn't have to
+      # wait for our rubust toolchain bump to clear CI first.
+      general-actions:
+        patterns:
+          - "actions/*"
+          - "github/*"
