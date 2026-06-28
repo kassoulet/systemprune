@@ -1,11 +1,15 @@
 //! Concurrent scanning and batched deletion across scanners.
 
-use crate::errors::{EngineError, SystemPruneError};
+use crate::errors::EngineError;
+use crate::history::{History, HistoryEntry, DEFAULT_KEEP_FILES, DEFAULT_MAX_BYTES};
 use crate::log::ActionLog;
 use crate::models::PrunableItem;
 use crate::scanners::Scanner;
+use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
+use std::path::PathBuf;
 use std::sync::Arc;
+use std::time::SystemTime;
 use tokio::task::JoinSet;
 
 /// The aggregated result of a single scan.
@@ -58,6 +62,183 @@ pub struct DeleteResult {
     pub error: Option<EngineError>,
 }
 
+/// One engine's aggregated dashboard row.
+///
+/// Built by [`Dashboard::compute`] from a [`ScanResult`].  Each
+/// row summarises a single engine: how many items it found,
+/// how much space they occupy, and what the single largest
+/// item is.  Used by the CLI's `dashboard` subcommand, the
+/// TUI's press-`D` screen, and the GUI's landing page.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct DashboardRow {
+    /// Scanner source name (e.g. ``"docker"``).  Matches
+    /// ``PrunableItem::source``; this is the grouping key.
+    pub source: String,
+    /// Number of items this engine found.
+    pub count: usize,
+    /// Sum of ``size_bytes`` for every item in the group.
+    pub total_bytes: u64,
+    /// Largest item in the group by ``size_bytes``.  ``None``
+    /// when the engine reported no items.
+    pub top: Option<DashboardTopItem>,
+}
+
+/// Largest single item in an engine's dashboard row.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct DashboardTopItem {
+    /// Reserved for future clickable GUI rows (`--json`
+    /// consumers see it today).  The CLI's text formatter
+    /// and the TUI/GUI's `Label`/`ActionRow` views only
+    /// render `name` and `size_bytes`; keeping the field
+    /// populated lets a follow-up commit light up a
+    /// click-to-jump-to-list-view action without a schema
+    /// bump.
+    pub id: String,
+    pub name: String,
+    pub size_bytes: u64,
+}
+
+/// The full dashboard view.
+///
+/// Returned by [`Dashboard::compute`] from a [`ScanResult`].
+/// Rows are sorted by ``total_bytes`` descending so the
+/// biggest disk-space contributors surface first.  Empty
+/// ``ScanResult``s produce an empty dashboard.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Dashboard {
+    pub rows: Vec<DashboardRow>,
+}
+
+impl Dashboard {
+    /// Build a dashboard from a [`ScanResult`].  Groups items by
+    /// ``source``, computes the count + total bytes + largest
+    /// item per group, then sorts rows by ``total_bytes``
+    /// descending.  When two groups have equal totals the
+    /// ``source`` name is used as a tie-breaker so the output
+    /// is deterministic.
+    pub fn compute(scan: &ScanResult) -> Self {
+        Self::compute_items(&scan.items)
+    }
+
+    /// Build a dashboard directly from a `&[PrunableItem]`.
+    /// Equivalent to `compute(&ScanResult { items: items.to_vec(), errors: vec![] })`
+    /// but avoids an allocation when the caller already has an
+    /// item slice handy (e.g. the TUI/GUI render loop, which
+    /// keeps a `Vec<PrunableItem>` in state).
+    pub fn compute_items(items: &[crate::models::PrunableItem]) -> Self {
+        let mut buckets: BTreeMap<String, Vec<&crate::models::PrunableItem>> = BTreeMap::new();
+        for item in items {
+            buckets.entry(item.source.clone()).or_default().push(item);
+        }
+        let mut out: Vec<DashboardRow> = Vec::with_capacity(buckets.len());
+        for (source, group) in buckets {
+            let total_bytes: u64 = group.iter().map(|i| i.size_bytes).sum();
+            let top = group
+                .iter()
+                .max_by_key(|i| i.size_bytes)
+                .map(|i| DashboardTopItem {
+                    id: i.id.clone(),
+                    name: i.name.clone(),
+                    size_bytes: i.size_bytes,
+                });
+            out.push(DashboardRow {
+                source,
+                count: group.len(),
+                total_bytes,
+                top,
+            });
+        }
+        // ``total_bytes`` desc, then ``source`` asc as a
+        // deterministic tie-breaker.
+        out.sort_by(|a, b| {
+            b.total_bytes
+                .cmp(&a.total_bytes)
+                .then_with(|| a.source.cmp(&b.source))
+        });
+        Self { rows: out }
+    }
+
+    /// Total bytes across every row.  Equivalent to
+    /// ``rows.iter().map(|r| r.total_bytes).sum()`` but
+    /// exposed as a method so callers do not need to know the
+    /// field name.
+    pub fn grand_total(&self) -> u64 {
+        self.rows.iter().map(|r| r.total_bytes).sum()
+    }
+
+    /// Render the dashboard as a fixed-width text table.  The
+    /// output uses ``format_size`` so columns line up at
+    /// common terminal widths.  Empty dashboards produce an
+    /// empty string (callers in the CLI/TUI add their own
+    /// "no data" prelude if needed).
+    pub fn format_text(&self) -> String {
+        use crate::size::format_size;
+        let mut out = String::new();
+        if self.rows.is_empty() {
+            return out;
+        }
+        let source_w = self
+            .rows
+            .iter()
+            .map(|r| r.source.len())
+            .max()
+            .unwrap_or(6)
+            .clamp(8, 20);
+        let size_w = 9; // "999.9 GiB" is 10 chars; we right-align at 9
+        // Fixed column width for the unconstrained "Top item"
+        // cell so the divider line + per-row lines share the
+        // same geometry.  See `truncate(s, TOP_CELL_WIDTH)` below.
+        out.push_str(&format!(
+            "{:<source_w$}  {:>6}  {:>size_w$}  {}\n",
+            "Engine", "Items", "Total", "Top item",
+            source_w = source_w,
+            size_w = size_w,
+        ));
+        let divider_width = source_w + 2 + 6 + 2 + size_w + 2 + TOP_CELL_WIDTH;
+        out.push_str(&format!("{}\n", "-".repeat(divider_width)));
+        for row in &self.rows {
+            let top_repr = match &row.top {
+                Some(t) => format!(
+                    "{} ({})",
+                    t.name,
+                    format_size(t.size_bytes as i64, true)
+                ),
+                None => "-".to_string(),
+            };
+            out.push_str(&format!(
+                "{:<source_w$}  {:>6}  {:>size_w$}  {}\n",
+                row.source,
+                row.count,
+                format_size(row.total_bytes as i64, true),
+                truncate(&top_repr, TOP_CELL_WIDTH),
+                source_w = source_w,
+                size_w = size_w,
+            ));
+        }
+        out
+    }
+}
+
+/// Fixed width of the unconstrained "Top item" column in
+/// [`Dashboard::format_text`].  Belt-and-braces shared with the
+/// `truncate(...)` call so the divider line and the per-row
+/// lines render at the same geometry.
+pub(crate) const TOP_CELL_WIDTH: usize = 60;
+
+/// Truncate ``s`` to at most ``max`` characters using an
+/// ellipsis when necessary.  Used by [`Dashboard::format_text`]
+/// for the ``Top item`` column so very long names do not break
+/// the column layout.
+fn truncate(s: &str, max: usize) -> String {
+    if s.chars().count() <= max {
+        s.to_string()
+    } else {
+        let mut out: String = s.chars().take(max.saturating_sub(1)).collect();
+        out.push('\u{2026}');
+        out
+    }
+}
+
 /// Coordinates scanning and deletion across a set of [`Scanner`]s.
 #[derive(Clone)]
 pub struct Orchestrator {
@@ -68,6 +249,17 @@ pub struct Orchestrator {
     /// are pushed here so the UIs can show a trace of what
     /// the app is doing.  A `None` log is a no-op.
     log: Option<ActionLog>,
+    /// Optional path to the persistent deletion log
+    /// (`$XDG_DATA_HOME/systemprune/history.json`).  When set,
+    /// every successful or engine-failed deletion performed
+    /// through `delete_many` is appended to this file with
+    /// 10 MB rotation per `more.md` §5.1.
+    ///
+    /// Items that the orchestrator refuses on its own
+    /// (status Active, previously-failed, missing scanner)
+    /// are *not* written to the history log: those are
+    /// orchestrator-level refusals, not engine interactions.
+    history_path: Option<PathBuf>,
 }
 
 impl Orchestrator {
@@ -88,6 +280,7 @@ impl Orchestrator {
             active,
             by_source,
             log: None,
+            history_path: None,
         }
     }
 
@@ -102,6 +295,30 @@ impl Orchestrator {
     /// orchestrator.
     pub fn set_log(&mut self, log: ActionLog) {
         self.log = Some(log);
+    }
+
+    /// Builder-style: attach a persistent history-log path.
+    /// When set, every successful or engine-failed deletion
+    /// performed via `delete_many` is appended to this file
+    /// with the §5.1 schema and 10 MB rotation.
+    ///
+    /// The path is *not* read at construction time; the
+    /// orchestrator just remembers it.  The parent directory
+    /// is created on first write.
+    pub fn with_history(mut self, path: PathBuf) -> Self {
+        self.history_path = Some(path);
+        self
+    }
+
+    /// Attach a persistent history-log path to an
+    /// already-constructed orchestrator.
+    pub fn set_history(&mut self, path: PathBuf) {
+        self.history_path = Some(path);
+    }
+
+    /// Return the configured history-log path, if any.
+    pub fn history_path(&self) -> Option<&PathBuf> {
+        self.history_path.as_ref()
     }
 
     pub fn all_scanners(&self) -> &[Arc<dyn Scanner>] {
@@ -204,6 +421,12 @@ impl Orchestrator {
                 crate::size::format_size(total as i64, true)
             ));
         }
+        // Snapshot of history wiring.  Captured before any
+        // async work so the receiver loop's buffer-push arm
+        // does not have to re-check `self.history_path` on
+        // every iteration.  The actual file write happens once
+        // after the receiver loop completes (see below).
+        let has_history = self.history_path.is_some();
         // Pre-allocate slots so the returned vector preserves the
         // caller's order regardless of completion order. Each slot
         // is filled either with the scanner's result or with a
@@ -214,6 +437,17 @@ impl Orchestrator {
         // write the result back to the correct slot.
         let mut pending: Vec<(usize, tokio::sync::oneshot::Receiver<DeleteResult>)> =
             Vec::new();
+        // Buffered history entries.  We build these per-task as
+        // results arrive but persist them in a single batch after
+        // the receiver loop so concurrent tasks do not race on the
+        // load/mutate/save cycle that a per-task `append_to_file`
+        // would trigger.
+        let mut history_entries: Vec<HistoryEntry> = Vec::new();
+        // Single timestamp shared by every entry produced by
+        // this `delete_many` call.  This both documents the
+        // burst more cleanly (one logical event -> one
+        // timestamp) and avoids N syscalls.
+        let now = SystemTime::now();
 
         for (idx, item) in items.iter().cloned().enumerate() {
             // Extract strings up-front so the borrowed ``item`` can
@@ -239,7 +473,7 @@ impl Orchestrator {
                 });
                 continue;
             }
-            if confirm && delete_errors.map_or(false, |m| m.contains_key(&item_key)) {
+            if confirm && delete_errors.is_some_and(|m| m.contains_key(&item_key)) {
                 slots[idx] = Some(DeleteResult {
                     item,
                     success: false,
@@ -315,6 +549,31 @@ impl Orchestrator {
                             ));
                         }
                     }
+                    // Buffer the result for history.  We
+                    // deliberately do *not* write to the file
+                    // here: writing per-task would race with
+                    // sibling tasks (each would load the same
+                    // file, append their entry, and write
+                    // back, potentially losing siblings'
+                    // entries).  The single batched write
+                    // happens after the receiver loop.
+                    //
+                    // Only *engine interactions* are
+                    // recorded: refused items (Active /
+                    // previously-failed / missing scanner)
+                    // were filtered out at slot setup so
+                    // they never enter `pending`.
+                    if has_history {
+                        history_entries.push(HistoryEntry::from_result(
+                            &result.item,
+                            result.success,
+                            result
+                                .error
+                                .as_ref()
+                                .and_then(|e| e.returncode),
+                            now,
+                        ));
+                    }
                     slots[idx] = Some(result);
                 }
                 Err(_) => {
@@ -325,7 +584,16 @@ impl Orchestrator {
                             original.source, original.id
                         ));
                     }
-                    slots[idx] = Some(DeleteResult {
+                    // Cancellation can happen mid-engine-run.
+                    // The engine was called but its result
+                    // never reached us through the oneshot
+                    // channel.  We buffer a "cancelled"
+                    // history entry so the audit trail still
+                    // records that an attempt happened --
+                    // written in the same single batched
+                    // pass as the Ok results above so concurrent
+                    // siblings cannot race.
+                    let cancel_result = DeleteResult {
                         item: original.clone(),
                         success: false,
                         error: Some(EngineError::new(
@@ -335,7 +603,19 @@ impl Orchestrator {
                             None,
                             "",
                         )),
-                    });
+                    };
+                    if has_history {
+                        history_entries.push(HistoryEntry::from_result(
+                            &cancel_result.item,
+                            cancel_result.success,
+                            cancel_result
+                                .error
+                                .as_ref()
+                                .and_then(|e| e.returncode),
+                            now,
+                        ));
+                    }
+                    slots[idx] = Some(cancel_result);
                 }
             }
         }
@@ -344,6 +624,21 @@ impl Orchestrator {
             .into_iter()
             .map(|o| o.expect("all slots filled"))
             .collect();
+        // Persist the buffered history entries in a single load/
+        // save cycle.  Done after the receiver loop so concurrent
+        // engine tasks cannot race on the file.
+        if let Some(path) = &self.history_path {
+            if let Err(e) = History::append_many(
+                path,
+                &history_entries,
+                DEFAULT_MAX_BYTES,
+                DEFAULT_KEEP_FILES,
+            ) {
+                if let Some(log) = &self.log {
+                    log.warn(format!("history write failed: {e}"));
+                }
+            }
+        }
         if let Some(log) = &self.log {
             let ok = results.iter().filter(|r| r.success).count();
             let fail = results.len() - ok;
@@ -375,9 +670,4 @@ impl std::fmt::Debug for Orchestrator {
             .field("active", &self.active.iter().map(|s| s.source()).collect::<Vec<_>>())
             .finish()
     }
-}
-
-/// Convert a [`SystemPruneError`] to a human-readable string.
-pub fn describe_error(err: &SystemPruneError) -> String {
-    err.to_string()
 }

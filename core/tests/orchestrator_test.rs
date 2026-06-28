@@ -5,7 +5,7 @@ use std::collections::BTreeMap;
 use std::sync::{Arc, Mutex};
 use systemprune_core::errors::EngineError;
 use systemprune_core::models::{Category, Engine, PrunableItem, Status};
-use systemprune_core::orchestrator::{Orchestrator, ScanResult};
+use systemprune_core::orchestrator::{Dashboard, Orchestrator, ScanResult};
 use systemprune_core::scanners::Scanner;
 
 /// Shared counter for the set of item ids the stub was asked to delete.
@@ -420,4 +420,216 @@ async fn delete_many_delete_errors_only_blocks_matching_keys() {
     // docker item.
     let calls = counter.0.lock().unwrap();
     assert_eq!(*calls, vec!["other".to_string()]);
+}
+
+// ---------------------------------------------------------------------------
+// Dashboard tests (more.md §4.1).
+// ---------------------------------------------------------------------------
+//
+// These tests pin the contract of `Dashboard::compute` and
+// `Dashboard::format_text` so the rendering surface (CLI,
+// TUI, GUI) cannot drift from one another.
+
+/// Convenience factory: a docker image with the given id, name,
+/// size, and status.  Keeps the `Dashboard` tests focused on
+/// grouping/sorting behaviour rather than boilerplate.
+fn docker_image(
+    id: &str,
+    name: &str,
+    size_bytes: u64,
+    status: Status,
+) -> PrunableItem {
+    PrunableItem {
+        id: id.to_string(),
+        name: name.to_string(),
+        engine: Engine::Docker,
+        source: "docker".to_string(),
+        category: Category::Image,
+        size_bytes,
+        status,
+        extra: Default::default(),
+    }
+}
+
+fn ollama_model(
+    id: &str,
+    name: &str,
+    size_bytes: u64,
+    status: Status,
+) -> PrunableItem {
+    PrunableItem {
+        id: id.to_string(),
+        name: name.to_string(),
+        engine: Engine::Ollama,
+        source: "ollama".to_string(),
+        category: Category::Model,
+        size_bytes,
+        status,
+        extra: Default::default(),
+    }
+}
+
+#[test]
+fn dashboard_compute_empty_scan_is_empty() {
+    let scan = ScanResult::default();
+    let dash = Dashboard::compute(&scan);
+    assert!(dash.rows.is_empty());
+    assert_eq!(dash.grand_total(), 0);
+}
+
+#[test]
+fn dashboard_compute_single_engine_groups_all_items() {
+    let items = vec![
+        docker_image("a", "rust:bookworm", 4_000_000_000, Status::Unused),
+        docker_image("b", "node:20",    2_000_000_000, Status::Unused),
+        docker_image("c", "alpine:3",     100_000_000, Status::Unused),
+    ];
+    let scan = ScanResult { items, errors: vec![] };
+    let dash = Dashboard::compute(&scan);
+    assert_eq!(dash.rows.len(), 1);
+    let row = &dash.rows[0];
+    assert_eq!(row.source, "docker");
+    assert_eq!(row.count, 3);
+    assert_eq!(row.total_bytes, 6_100_000_000);
+    let top = row.top.as_ref().expect("dashboard row with items has a top item");
+    assert_eq!(top.name, "rust:bookworm");
+    assert_eq!(top.size_bytes, 4_000_000_000);
+    assert_eq!(top.id, "a");
+}
+
+#[test]
+fn dashboard_compute_sorts_rows_by_total_desc_with_deterministic_tiebreak() {
+    // Three engines with different totals so the sort is fixed.
+    // Then a fourth with the same total as the third to verify
+    // the source-name tie-breaker.
+    let items = vec![
+        docker_image("d1", "d1", 100, Status::Unused),
+        ollama_model("o1", "o1", 9_900, Status::Unused),
+        // `flatpak` and `snap` have equal totals -- `flatpak`
+        // should come first alphabetically.
+        PrunableItem {
+            id: "f1".into(),
+            name: "f1".into(),
+            engine: Engine::Flatpak,
+            source: "flatpak".into(),
+            category: Category::App,
+            size_bytes: 500,
+            status: Status::Unused,
+            extra: Default::default(),
+        },
+        PrunableItem {
+            id: "s1".into(),
+            name: "s1".into(),
+            engine: Engine::Snap,
+            source: "snap".into(),
+            category: Category::SnapRevision,
+            size_bytes: 500,
+            status: Status::Unused,
+            extra: Default::default(),
+        },
+    ];
+    let scan = ScanResult { items, errors: vec![] };
+    let dash = Dashboard::compute(&scan);
+    let sources: Vec<&str> = dash.rows.iter().map(|r| r.source.as_str()).collect();
+    // Descending totals: ollama (9.9K), flatpak (500), snap (500),
+    // docker (100). flatpak precedes snap on the equal-total
+    // tie-break because `f` < `s`.
+    assert_eq!(sources, vec!["ollama", "flatpak", "snap", "docker"]);
+}
+
+#[test]
+fn dashboard_compute_top_item_picks_largest_in_group() {
+    let items = vec![
+        docker_image("tiny",   "tiny:latest",        100, Status::Unused),
+        docker_image("medium", "medium:latest",   50_000, Status::Unused),
+        docker_image("big",    "big:latest", 2_000_000_000, Status::Unused),
+        docker_image("med2",   "med2:latest",     70_000, Status::Unused),
+    ];
+    let scan = ScanResult { items, errors: vec![] };
+    let dash = Dashboard::compute(&scan);
+    let top = dash.rows[0].top.as_ref().expect("top item present");
+    // "big" is the unique maximum so the result is unambiguous.
+    assert_eq!(top.id, "big");
+    assert_eq!(top.name, "big:latest");
+    assert_eq!(top.size_bytes, 2_000_000_000);
+}
+
+#[test]
+fn dashboard_compute_includes_active_items_in_count_and_total() {
+    // The dashboard surfaces *every* item, regardless of status,
+    // so a user can see how much space an active container is
+    // occupying.  Deletion is gated by `PrunableItem::is_safe_to
+    // _delete` elsewhere; the dashboard is a read-only snapshot.
+    let items = vec![
+        docker_image("a", "a", 100, Status::Unused),
+        docker_image("b", "b", 200, Status::Active),
+    ];
+    let scan = ScanResult { items, errors: vec![] };
+    let dash = Dashboard::compute(&scan);
+    assert_eq!(dash.rows.len(), 1);
+    assert_eq!(dash.rows[0].count, 2);
+    assert_eq!(dash.rows[0].total_bytes, 300);
+}
+
+#[test]
+fn dashboard_grand_total_matches_sum_across_rows() {
+    let items = vec![
+        docker_image("a", "a", 100, Status::Unused),
+        ollama_model("o", "o", 200, Status::Unused),
+    ];
+    let scan = ScanResult { items, errors: vec![] };
+    let dash = Dashboard::compute(&scan);
+    assert_eq!(dash.grand_total(), 300);
+}
+
+#[test]
+fn dashboard_format_text_on_empty_input_is_empty_string() {
+    let dash = Dashboard::default();
+    let text = dash.format_text();
+    assert!(text.is_empty(), "empty dashboard -> empty text");
+}
+
+#[test]
+fn dashboard_format_text_contains_header_and_each_row() {
+    // Sizes chosen so `format_size(., binary=true)` produces
+    // a clean integer GiB value at the chosen bucket.  The
+    // raw `5_000_000_000` byte value would render as "4.7
+    // GiB" (binary round-down), so the test uses exactly
+    // `4 * 1024^3` for deterministic output.
+    let four_gib = 4_u64 * 1024 * 1024 * 1024;
+    let items = vec![
+        docker_image("big", "big:latest", four_gib, Status::Unused),
+        docker_image("sm",  "sm:latest",        100, Status::Unused),
+    ];
+    let scan = ScanResult { items, errors: vec![] };
+    let text = Dashboard::compute(&scan).format_text();
+    assert!(text.contains("Engine"), "header column 'Engine': {text}");
+    assert!(text.contains("Items"), "header column 'Items': {text}");
+    assert!(text.contains("Total"), "header column 'Total': {text}");
+    assert!(text.contains("Top item"), "header column 'Top item': {text}");
+    assert!(text.contains("docker"), "engine name appears: {text}");
+    assert!(text.contains("2"), "count 2 appears: {text}");
+    assert!(
+        text.contains("big:latest"),
+        "top item name appears: {text}"
+    );
+    assert!(
+        text.contains("4.0 GiB"),
+        "4.0 GiB appears in table: {text}"
+    );
+}
+
+#[test]
+fn dashboard_format_text_truncates_long_top_item_names() {
+    // A very long name that would break the column layout.  The
+    // truncation adds an ellipsis so the column stays tidy.
+    let big_name = "a".repeat(200);
+    let items = vec![docker_image("big", &big_name, 1_000, Status::Unused)];
+    let scan = ScanResult { items, errors: vec![] };
+    let text = Dashboard::compute(&scan).format_text();
+    assert!(text.contains('\u{2026}'), "ellipsis marks truncation: {text}");
+    assert!(
+        !text.contains(&big_name),
+        "full name was not truncated: {text}"
+    );
 }
