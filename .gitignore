@@ -15,3 +15,6 @@ gui/gen/
 
 # TUI
 *.log
+
+# Scratch / debug
+/tmp/
