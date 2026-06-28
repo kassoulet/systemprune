@@ -173,12 +173,7 @@ impl Df {
         // across hosts.
         out.push_str(&format!(
             "{:<12}  {:>9}  {:>9}  {:>9}  {:>4}  {}\n",
-            "Filesystem",
-            "Size",
-            "Used",
-            "Avail",
-            "Use%",
-            "Mounted on",
+            "Filesystem", "Size", "Used", "Avail", "Use%", "Mounted on",
         ));
         out.push_str(&format!("{}\n", "-".repeat(60)));
         // Filesystem row.  Use `binary=false` so `df`-style
@@ -328,7 +323,8 @@ fn resolve_device_for_mount(mount_path: &str) -> String {
         // Greedy longest-prefix match so `/home/foo` picks
         // the `/home` mount in preference to `/`.
         if candidate_mp == target
-            || (target.starts_with(candidate_mp) && target.chars().nth(candidate_mp.len()) == Some('/'))
+            || (target.starts_with(candidate_mp)
+                && target.chars().nth(candidate_mp.len()) == Some('/'))
         {
             let len = candidate_mp.len();
             if best.as_ref().map(|(l, _)| len > *l).unwrap_or(true) {
@@ -336,7 +332,8 @@ fn resolve_device_for_mount(mount_path: &str) -> String {
             }
         }
     }
-    best.map(|(_, d)| d).unwrap_or_else(|| "<unknown>".to_string())
+    best.map(|(_, d)| d)
+        .unwrap_or_else(|| "<unknown>".to_string())
 }
 
 /// Non-Linux stub.  Keeps the cross-platform build clean;
@@ -374,8 +371,7 @@ mod tests {
     #[test]
     fn stat_filesystem_on_tmpdir_returns_consistent_numbers() {
         let dir = tempfile::tempdir().expect("tempdir");
-        let stats =
-            stat_filesystem(dir.path()).expect("statvfs on tempdir should succeed");
+        let stats = stat_filesystem(dir.path()).expect("statvfs on tempdir should succeed");
         // Total bytes is at least the block size of an
         // empty tmpdir; depends on the filesystem but is
         // always non-zero on Linux.

@@ -140,11 +140,7 @@ impl History {
             Ok(text) => serde_json::from_str(&text).map_err(|e| {
                 SystemPruneError::Io(std::io::Error::new(
                     std::io::ErrorKind::InvalidData,
-                    format!(
-                        "failed to parse {} as history.json: {}",
-                        path.display(),
-                        e
-                    ),
+                    format!("failed to parse {} as history.json: {}", path.display(), e),
                 ))
             }),
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(Self::new()),
@@ -392,16 +388,13 @@ fn argv_for(item: &PrunableItem) -> Vec<String> {
         ("podman", Category::Container) => svec(&["podman", "rm", "-f", &id]),
         ("podman", Category::Volume) => svec(&["podman", "volume", "rm", &id]),
         ("podman", Category::Network) => svec(&["podman", "network", "rm", &id]),
-        ("flatpak", Category::App)
-        | ("flatpak", Category::Runtime) => {
+        ("flatpak", Category::App) | ("flatpak", Category::Runtime) => {
             svec(&["flatpak", "uninstall", "--delete-data", "-y", &id])
         }
         ("snap", Category::SnapRevision) => svec(&["snap", "remove", &id]),
         ("ollama", Category::Model) => svec(&["ollama", "rm", &id]),
         ("go_cache", Category::BuildCache) => svec(&["go", "clean", "-cache"]),
-        ("conda", Category::PythonVenv) => {
-            svec(&["conda", "env", "remove", "-p", &id, "-y"])
-        }
+        ("conda", Category::PythonVenv) => svec(&["conda", "env", "remove", "-p", &id, "-y"]),
         ("node_modules", Category::NodeModules)
         | ("python_venv", Category::PythonVenv)
         | ("tox", Category::DependencyCache)
@@ -422,11 +415,7 @@ mod tests {
     use std::collections::BTreeMap;
     use std::time::Duration;
 
-    fn make_item(
-        source: &str,
-        category: Category,
-        id: &str,
-    ) -> PrunableItem {
+    fn make_item(source: &str, category: Category, id: &str) -> PrunableItem {
         let engine = match source {
             "docker" => Engine::Docker,
             "podman" => Engine::Podman,
@@ -506,10 +495,7 @@ mod tests {
             Category::NodeModules,
             "/home/u/proj/node_modules",
         );
-        assert_eq!(
-            command_for(&item),
-            "trash /home/u/proj/node_modules"
-        );
+        assert_eq!(command_for(&item), "trash /home/u/proj/node_modules");
     }
 
     #[test]
@@ -538,10 +524,7 @@ mod tests {
             Category::BuildCache,
             "/home/u/.cargo/registry/cache",
         );
-        assert_eq!(
-            command_for(&item),
-            "trash /home/u/.cargo/registry/cache"
-        );
+        assert_eq!(command_for(&item), "trash /home/u/.cargo/registry/cache");
     }
 
     #[test]
@@ -554,8 +537,7 @@ mod tests {
     fn history_entry_from_success_uses_zero_exit_code() {
         let item = make_item("docker", Category::Image, "sha256:a");
         let now = SystemTime::UNIX_EPOCH + Duration::from_secs(0);
-        let entry =
-            HistoryEntry::from_result(&item, true, None, now);
+        let entry = HistoryEntry::from_result(&item, true, None, now);
         assert_eq!(entry.exit_code, 0);
         assert_eq!(entry.command, "docker rmi -f sha256:a");
         assert_eq!(entry.source, "docker");
@@ -569,8 +551,7 @@ mod tests {
     fn history_entry_from_failure_prefers_engine_returncode() {
         let item = make_item("docker", Category::Image, "sha256:a");
         let now = SystemTime::UNIX_EPOCH + Duration::from_secs(0);
-        let entry =
-            HistoryEntry::from_result(&item, false, Some(125), now);
+        let entry = HistoryEntry::from_result(&item, false, Some(125), now);
         assert_eq!(entry.exit_code, 125);
     }
 
@@ -578,8 +559,7 @@ mod tests {
     fn history_entry_from_failure_without_engine_returncode_uses_minus_one() {
         let item = make_item("docker", Category::Image, "sha256:a");
         let now = SystemTime::UNIX_EPOCH + Duration::from_secs(0);
-        let entry =
-            HistoryEntry::from_result(&item, false, None, now);
+        let entry = HistoryEntry::from_result(&item, false, None, now);
         assert_eq!(entry.exit_code, -1);
     }
 
@@ -589,14 +569,9 @@ mod tests {
         let path = dir.path().join("history.json");
         let mut h = History::new();
         let now = SystemTime::UNIX_EPOCH + Duration::from_secs(1_700_000_000);
-        let item = make_item(
-            "docker",
-            Category::Image,
-            "sha256:abcdef",
-        );
-        h.entries.push(HistoryEntry::from_result(
-            &item, true, None, now,
-        ));
+        let item = make_item("docker", Category::Image, "sha256:abcdef");
+        h.entries
+            .push(HistoryEntry::from_result(&item, true, None, now));
         h.save(&path).unwrap();
 
         let loaded = History::load(&path).unwrap();
@@ -629,15 +604,9 @@ mod tests {
     fn append_to_file_creates_entries() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("history.json");
-        let item = make_item(
-            "docker",
-            Category::Image,
-            "sha256:abc",
-        );
+        let item = make_item("docker", Category::Image, "sha256:abc");
         let now = SystemTime::UNIX_EPOCH + Duration::from_secs(0);
-        let entry = HistoryEntry::from_result(
-            &item, true, None, now,
-        );
+        let entry = HistoryEntry::from_result(&item, true, None, now);
         History::append_to_file(&path, &entry, 1 << 20, 5).unwrap();
         let h = History::load(&path).unwrap();
         assert_eq!(h.entries.len(), 1);
@@ -657,19 +626,10 @@ mod tests {
             // 50-character names push the file past 1 KB
             // after a handful of entries.
             let id = format!("{:050}", i);
-            let mut item =
-                make_item("docker", Category::Image, &id);
+            let mut item = make_item("docker", Category::Image, &id);
             item.name = id.clone();
-            let entry = HistoryEntry::from_result(
-                &item, true, None, now,
-            );
-            History::append_to_file(
-                &path,
-                &entry,
-                max_bytes,
-                5,
-            )
-            .unwrap();
+            let entry = HistoryEntry::from_result(&item, true, None, now);
+            History::append_to_file(&path, &entry, max_bytes, 5).unwrap();
         }
         // After enough appends we should have at least one
         // rotation file.  The exact threshold depends on the
@@ -701,7 +661,9 @@ mod tests {
         let mut h = History::new();
         h.entries.push(HistoryEntry::from_result(
             &make_item("docker", Category::Image, "sha256:abc"),
-            true, None, now,
+            true,
+            None,
+            now,
         ));
         h.save(&path).unwrap();
         rotate(&path, 3).unwrap();
@@ -715,7 +677,9 @@ mod tests {
         // the new burst lands in .1.
         h.entries.push(HistoryEntry::from_result(
             &make_item("docker", Category::Image, "sha256:def"),
-            true, None, now,
+            true,
+            None,
+            now,
         ));
         h.save(&path).unwrap();
         rotate(&path, 3).unwrap();
@@ -727,7 +691,9 @@ mod tests {
         // the discard slot that must NOT receive a new entry.
         h.entries.push(HistoryEntry::from_result(
             &make_item("docker", Category::Image, "sha256:ghi"),
-            true, None, now,
+            true,
+            None,
+            now,
         ));
         h.save(&path).unwrap();
         rotate(&path, 3).unwrap();
@@ -787,8 +753,7 @@ mod tests {
                 None,
                 now,
             );
-            History::append_to_file(&path, &entry, 1 << 20, 5)
-                .unwrap();
+            History::append_to_file(&path, &entry, 1 << 20, 5).unwrap();
         }
         let new_entries: Vec<HistoryEntry> = ["sha256:c", "sha256:d"]
             .iter()
@@ -801,8 +766,7 @@ mod tests {
                 )
             })
             .collect();
-        History::append_many(&path, &new_entries, 1 << 20, 5)
-            .unwrap();
+        History::append_many(&path, &new_entries, 1 << 20, 5).unwrap();
         let h = History::load(&path).unwrap();
         assert_eq!(h.entries.len(), 4);
         assert_eq!(h.entries[0].id, "sha256:a");

@@ -150,7 +150,12 @@ async fn main() -> ExitCode {
                 println!("(no prunable items found)");
                 return ExitCode::SUCCESS;
             }
-            let max_name = items.iter().map(|i| i.name.len()).max().unwrap_or(4).clamp(16, 60);
+            let max_name = items
+                .iter()
+                .map(|i| i.name.len())
+                .max()
+                .unwrap_or(4)
+                .clamp(16, 60);
             println!(
                 "{:<10} {:<14} {:<10} {:>10}  NAME",
                 "SOURCE", "CATEGORY", "STATUS", "SIZE"
@@ -206,10 +211,8 @@ async fn main() -> ExitCode {
                 return ExitCode::from(1);
             }
             if !yes {
-                let unsafe_items: Vec<&PrunableItem> = targets
-                    .iter()
-                    .filter(|t| !t.is_safe_to_delete())
-                    .collect();
+                let unsafe_items: Vec<&PrunableItem> =
+                    targets.iter().filter(|t| !t.is_safe_to_delete()).collect();
                 if !unsafe_items.is_empty() {
                     eprintln!("Refusing to delete active items without --yes:");
                     for u in unsafe_items {
@@ -251,7 +254,12 @@ async fn main() -> ExitCode {
                 if r.success {
                     println!("  ok {}:{}", r.item.source, r.item.id);
                 } else {
-                    eprintln!("  FAILED {}:{} - {}", r.item.source, r.item.id, error_to_string(&r.error));
+                    eprintln!(
+                        "  FAILED {}:{} - {}",
+                        r.item.source,
+                        r.item.id,
+                        error_to_string(&r.error)
+                    );
                     rc = 1;
                 }
             }
@@ -360,11 +368,7 @@ fn run_history(limit: usize, show_path: bool, file: Option<PathBuf>, as_json: bo
 ///   `mount_path` returns an error (e.g. `ENOENT`,
 ///   `EACCES`).  In that case we print the syscall error to
 ///   stderr and exit with code 1.
-async fn run_df(
-    orchestrator: &Orchestrator,
-    mount_path: PathBuf,
-    as_json: bool,
-) -> ExitCode {
+async fn run_df(orchestrator: &Orchestrator, mount_path: PathBuf, as_json: bool) -> ExitCode {
     let result = orchestrator.scan_all().await;
     let error_count = result.errors.len();
     let computed = match Df::compute(&result, &mount_path) {

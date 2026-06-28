@@ -79,6 +79,7 @@ mod tests {
     fn make_fake_binary(dir: &std::path::Path, name: &str) {
         std::fs::OpenOptions::new()
             .create(true)
+            .truncate(true)
             .write(true)
             .mode(0o755)
             .open(dir.join(name))
