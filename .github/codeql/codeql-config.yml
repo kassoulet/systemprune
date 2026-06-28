@@ -18,19 +18,24 @@
 # the workflow does NOT also set them.  Both sides are kept
 # consistent as a result.
 #
-# To add a custom query (e.g. an `unsafe-audit` pack):
-#   1. Drop the `.ql` file(s) into
-#      `.github/codeql/queries/<lang>/`.
-#   2. Add a `codeql-pack.yml` manifest at the root of that
-#      directory declaring `name`, `version`, `library: true`
-#      (or `query-pack: true` for query files) plus the
-#      `defaultSuite` block if the pack ships a `*.qls` suite.
-#      Without `codeql-pack.yml`, CodeQL treats the path as a
-#      loose file glob rather than a query pack — the
-#      easiest footgun to hit on first contribution.
-#   3. Append `./.github/codeql/queries` to `queries:` below.
-#   4. (Optional) Use `query-filters:` further down to scope
-#      loud queries to specific paths.
+# `unsafe-audit` pack (wired up below):
+#   * `.github/codeql/queries/rust/BlockAudit.ql` — flags
+#     `unsafe { ... }` blocks on every push so reviewers are
+#     nudged to justify each one inline with a
+#     `// SAFETY: <reason>` comment per Rust API guidelines.
+#   * `.github/codeql/queries/codeql-pack.yml` — codeql-pack
+#     manifest declaring `name: systemprune-rs/unsafe-audit`,
+#     `version: 0.0.0`, `query-pack: true`.  Without this
+#     manifest, CodeQL treats the directory as a loose file
+#     glob rather than a query pack — the easiest footgun to
+#     hit when wiring up additional queries.
+#
+# Forward-compat: to add a SECOND query pack, drop its `.ql`
+# files under a sibling directory (e.g.
+# `.github/codeql/queries-audit/<lang>/`) with its own
+# `codeql-pack.yml` and append that path to `queries:`.
+# (Optional) Use `query-filters:` below to scope a noisy
+# query to specific paths.
 #
 # Schema reference:
 #   https://docs.github.com/en/code-security/code-scanning/automatically-scanning-your-code-for-vulnerabilities-and-errors/customizing-code-scanning
@@ -62,7 +67,8 @@ disable-default-queries: false
 # when custom queries are introduced (e.g.
 # `./.github/codeql/queries`).
 queries:
-  - security-and-quality
+  - uses: security-and-quality
+  - uses: ./.github/codeql/queries
 
 # Skip the per-crate `target/` build output at every depth
 # and the `tmp/` scratch used by diagnostic scripts.

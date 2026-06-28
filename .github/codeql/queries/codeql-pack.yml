@@ -1,0 +1,23 @@
+# CodeQL pack manifest for the unsafe-block audit query.
+#
+# Modern `codeql-pack.yml` format (NOT the deprecated `qlpack.yml`
+# name — both still load, but `codeql-pack.yml` is the canonical
+# form for new packs since CodeQL CLI 0.10+).
+#
+# `query-pack: true` declares this pack ships query files (vs.
+# `library: true` which would declare it ships reusable QLL
+# predicates / helpers).  The two flags are mutually exclusive.
+#
+# Pairs with `.github/codeql/queries/rust/BlockAudit.ql` —
+# CodeQL discovers the .ql file under the pack root via the
+# default `<pack-root>/**/*.ql` glob.  No explicit `include:`
+# needed for a single-file pack.
+#
+# Loaded by `.github/codeql/codeql-config.yml` (which adds
+# `./.github/codeql/queries` to the top-level `queries:` list).
+# The on-push CodeQL run sees this pack alongside the upstream
+# `security-and-quality` pack.
+
+name: systemprune-rs/unsafe-audit
+version: 0.0.0
+query-pack: true
