@@ -1,0 +1,199 @@
+name: CI
+
+# Main CI workflow for the SystemPrune workspace (Rust 1.75 MSRV,
+# GTK4 + libadwaita GUI). Runs on every push and PR touching `main`.
+#
+# Jobs:
+#   * fmt        — `cargo fmt --all -- --check`
+#   * clippy     — `cargo clippy --workspace --all-targets -- -D warnings`
+#   * msrv       — `cargo build --workspace --locked` on Rust 1.75
+#   * build-test — build + test the full workspace, plus a CLI smoke
+#                  test that exercises `--help` on every subcommand.
+#
+# All GUI-touching jobs install the GTK4 + libadwaita system headers
+# via apt (cargo's gtk4-rs / libadwaita crates use pkg-config to find
+# them on Linux). `Swatinem/rust-cache@v2` shares a cargo + target
+# directory cache across jobs keyed by Cargo.toml + Cargo.lock so the
+# apt install is the only per-job overhead.
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+# Cancel superseded runs of the same branch/PR to save minutes. The
+# `concurrency.group` collapses PR pushes with their predecessors and
+# in-flight main pushes with their previous run.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  CARGO_TERM_COLOR: always
+  RUST_BACKTRACE: 1
+
+jobs:
+  fmt:
+    name: cargo fmt
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@1.75
+        with:
+          components: rustfmt
+      - uses: Swatinem/rust-cache@v2
+      - name: cargo fmt --all --check
+        # `--check` exits non-zero on the first diff; the failure
+        # message tells the contributor which lines need reformatting
+        # (and they can `cargo fmt` locally to fix).
+        run: cargo fmt --all -- --check
+
+  clippy:
+    name: cargo clippy
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@1.75
+        with:
+          components: clippy, rustfmt
+      - name: Install GTK4 + libadwaita system headers
+        # `libadwaita-1-dev` pulls in `libgtk-4-dev` transitively on
+        # Ubuntu 22.04+; install both explicitly so the pkg-config
+        # probe in gtk4-rs / libadwaita never has to guess at a
+        # missing direct dep.
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            libgtk-4-dev \
+            libadwaita-1-dev \
+            pkg-config
+      - uses: Swatinem/rust-cache@v2
+      - name: cargo clippy --workspace --all-targets
+        # `-D warnings` escalates every lint into an error so a
+        # `--noisy` PR that adds a single `#[allow(missing_docs)]`
+        # without justification fails CI. `--locked` pins Cargo.lock
+        # so reproducible.
+        run: cargo clippy --workspace --all-targets --locked -- -D warnings
+
+  msrv:
+    name: MSRV build (Rust 1.75)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@1.75
+      - name: Install GTK4 + libadwaita system headers
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            libgtk-4-dev \
+            libadwaita-1-dev \
+            pkg-config
+      - uses: Swatinem/rust-cache@v2
+      - name: cargo build on the declared MSRV
+        # `--locked` pins Cargo.lock; `cargo build` (no `--all-targets`)
+        # keeps the MSRV surface narrow — tests / benches / examples
+        # may legitimately require newer Rust.
+        run: cargo build --workspace --locked
+
+  build-test:
+    name: Build + test (ubuntu + GTK4)
+    runs-on: ubuntu-latest
+    # The heavy job runs in parallel with the lighter lint jobs so a
+    # passing fmt/clippy doesn't gate the long compile.
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@1.75
+      - name: Install GTK4 + libadwaita + pkg-config system headers
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            libgtk-4-dev \
+            libadwaita-1-dev \
+            pkg-config
+      - uses: Swatinem/rust-cache@v2
+      - name: cargo build --workspace --all-targets
+        run: cargo build --workspace --locked --all-targets
+      - name: cargo test --workspace --all-targets
+        # `--no-fail-fast` continues past the first failure so a
+        # contributor sees the full set of regressions in CI, not
+        # just the first one to trip.
+        run: cargo test --workspace --locked --all-targets --no-fail-fast
+      - name: CLI smoke tests
+        # Smoke-test each subcommand's `--help` text — proves the
+        # binary actually launches and the argument parser binds the
+        # declared verbs (list, delete, engines, dashboard, df,
+        # history, version). `--help` is non-destructive so safe to
+        # run in CI.
+        run: |
+          set -euo pipefail
+          ./target/debug/systemprune --help >/dev/null
+          for verb in list delete engines dashboard df history version; do
+            ./target/debug/systemprune $verb --help >/dev/null
+          done
+
+  # ----- Headed GUI tests (Xvfb + GTK4) -------------------------------
+  # The 7 `#[ignore]` GTK widget regression tests in
+  # `gui/src/window.rs` (e.g. `group_toggle_clicked_*`,
+  # `make_item_row_does_not_panic_*`,
+  # `update_group_toggle_button_does_not_panic_*`) need a real
+  # X display to construct widgets.  Run them under Xvfb so
+  # they execute in CI instead of silently skipping past the
+  # `#[ignore]` filter.
+  gui:
+    name: Headed GUI tests (xvfb + GTK4)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@1.75
+      - name: Install GTK4 + libadwaita + Xvfb + pkg-config system headers
+        # `xvfb` provides the in-memory X display the GTK4
+        # runtime needs to construct real `CheckButton` /
+        # `ExpanderRow` widgets during the 7 `#[ignore]`
+        # regression tests.  Without it, GTK aborts at widget
+        # creation time ("cannot open display") and the entire
+        # gui crate's test binary exits before the first
+        # assertion; CI silently passes because we ran the
+        # tests **without** `--ignored`.
+        #
+        # Note: Pango font rendering is intentionally NOT a
+        # dependency here — the regression tests construct
+        # widgets, they do not render text.  If a future test
+        # needs font fallback, install `fonts-dejavu-core` then.
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            libgtk-4-dev \
+            libadwaita-1-dev \
+            pkg-config \
+            xvfb
+      - uses: Swatinem/rust-cache@v2
+      - name: Run the `#[ignore]` GUI regression tests under Xvfb
+        # `xvfb-run -a` auto-assigns a free `:N` display
+        # number, sets `DISPLAY`, and tears down the X server
+        # on exit.  The split between **cargo flags** (before
+        # `--`) and **test-binary flags** (after `--`) matters:
+        # `--no-fail-fast` is a CARGO flag — it tells the test
+        # runner to keep going after the first failure so a
+        # contributor sees all 7 `#[ignore]` regressions in
+        # one CI run, not just the first to trip.  Putting it
+        # after `--` would forward it to the test binary
+        # (libtest) which silently ignores unknowns.
+        #
+        # `--test-threads=1` is required for GTK: GDK state
+        # is process-global, multi-threaded cargo-test workers
+        # race on widget construction and dead-lock waiting
+        # for the X server's big lock.
+        #
+        # `--locked` pins Cargo.lock; a Dependabot PR sneaking
+        # a `libc`/`tokio` mismatch past the lighter gates
+        # also fails here.
+        env:
+          # Force the X11 backend under Xvfb.  Without this,
+          # GTK 4.12+ on `ubuntu-latest` can prefer Wayland
+          # fallback at runtime and crash with "cannot open
+          # display" before the test body runs.  Xvfb IS an X
+          # server so the X11 backend is the correct match.
+          GDK_BACKEND: x11
+        run: xvfb-run -a cargo test -p systemprune-gui --locked --no-fail-fast -- --ignored --nocapture --test-threads=1
+
