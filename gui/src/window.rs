@@ -950,7 +950,7 @@ fn rebuild_dashboard_widgets(
         let render = describe_dashboard_row(row);
         let action_row = ActionRow::builder()
             .title(&render.title)
-            .subtitle(&escape_markup(&render.subtitle))
+            .subtitle(escape_markup(&render.subtitle))
             .activatable(true)
             .build();
         action_row.set_tooltip_text(Some(&format!(
@@ -1121,11 +1121,10 @@ fn append_group(
     for status in [Status::Dangling, Status::Stopped] {
         let safe_for_status = items.iter().any(|i| {
             i.status == status
-                && state
+                && !state
                     .borrow()
                     .delete_errors
                     .contains_key(&(i.source.clone(), i.id.clone()))
-                    == false
                 && i.is_safe_to_delete()
         });
         if !safe_for_status {
@@ -1298,11 +1297,7 @@ pub(crate) fn describe_item_row(
         Some(err.clone())
     } else if let Some(path) = item.extra.get("path") {
         Some(path.clone())
-    } else if let Some(root) = item.extra.get("project_root") {
-        Some(root.clone())
-    } else {
-        None
-    };
+    } else { item.extra.get("project_root").cloned() };
     // `is_deletable_for_real` collapses the two safety predicates
     // (status + previous-failure) into one, so a failed item with
     // `Status::Unused` is correctly treated as non-deletable here.

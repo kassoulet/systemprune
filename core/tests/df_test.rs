@@ -6,7 +6,6 @@
 //! kernel numbers rather than hard-coded constants.  Inline
 //! unit tests for the same surface live in `core/src/df.rs`.
 
-use std::path::Path;
 use systemprune_core::df::{self, Df};
 use systemprune_core::models::{Category, Engine, PrunableItem, Status};
 use systemprune_core::orchestrator::ScanResult;

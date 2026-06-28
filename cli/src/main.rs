@@ -426,7 +426,7 @@ async fn run_dashboard(
             .filter(|r| r.source == *name)
             .cloned()
             .collect(),
-        None => dash.rows.iter().cloned().collect(),
+        None => dash.rows.to_vec(),
     };
     if as_json {
         match serde_json::to_string_pretty(&filtered) {
@@ -477,8 +477,8 @@ async fn run_dashboard(
 /// order matches the order things happened in real life.
 fn print_history_table(slice: &[HistoryEntry], total: usize, visible: usize) {
     println!(
-        "{:<20}  {:<10} {:<10} {:<10} {:>10}  {}",
-        "TIMESTAMP", "SOURCE", "CATEGORY", "STATUS", "SIZE", "NAME"
+        "{:<20}  {:<10} {:<10} {:<10} {:>10}  NAME",
+        "TIMESTAMP", "SOURCE", "CATEGORY", "STATUS", "SIZE"
     );
     println!("{}", "-".repeat(80));
     for e in slice {

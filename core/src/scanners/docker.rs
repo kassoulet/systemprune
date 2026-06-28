@@ -391,6 +391,14 @@ impl DockerScanner {
     }
 }
 
+/// Normalise a Docker image id for set membership comparison.
+/// Strips the ``sha256:`` prefix and truncates to 12 characters so
+/// that short and long forms of the same id compare equal.
+fn short_image_id(id: &str) -> String {
+    let stripped = id.strip_prefix("sha256:").unwrap_or(id);
+    stripped.chars().take(12).collect()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -435,12 +443,4 @@ mod tests {
         assert_eq!(short_image_id("abc123"), "abc123");
         assert_eq!(short_image_id(""), "");
     }
-}
-
-/// Normalise a Docker image id for set membership comparison.
-/// Strips the ``sha256:`` prefix and truncates to 12 characters so
-/// that short and long forms of the same id compare equal.
-fn short_image_id(id: &str) -> String {
-    let stripped = id.strip_prefix("sha256:").unwrap_or(id);
-    stripped.chars().take(12).collect()
 }
