@@ -11,6 +11,13 @@
 //! - `a` — select/deselect all (flat) across all safe items
 //! - `A` (shift) — select/deselect all safe items in the current group
 //! - `d` — delete selected
+//! - `D` (shift) — toggle the per-engine disk dashboard view (more.md §4.1)
+//!
+//! **Note on `D`.**  more.md §4.1 says the dashboard is reached
+//! by pressing `d`, but lowercase `d` is already taken by the
+//! "delete selected" binding.  We use `D` (shift+d) instead so
+//! existing users do not have to relearn "delete", and the
+//! deviation is noted in `more.md` and `IMPLEMENTATION_STATUS.md`.
 
 use anyhow::Result;
 use crossterm::event::{self, Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers, MouseEvent, MouseButton};
@@ -23,7 +30,7 @@ use std::io::Stdout;
 use std::time::Duration;
 use systemprune_core::log::ActionLog;
 use systemprune_core::models::{Category, PrunableItem, Status};
-use systemprune_core::orchestrator::Orchestrator;
+use systemprune_core::orchestrator::{Dashboard, Orchestrator};
 use systemprune_core::scanners::all_scanners;
 use systemprune_core::size::format_size;
 use systemprune_core::sort::SortMode;
@@ -91,6 +98,13 @@ struct App {
     /// When true, the main view is replaced by a scrollable
     /// log view.  Toggled by the `l` key binding.
     show_log: bool,
+    /// When true, the main view is replaced by the dashboard
+    /// summary (more.md §4.1).  Toggled by the `D` (shift+d)
+    /// key binding.  Note: we use `D` rather than `d` because
+    /// the lowercase `d` binding is reserved for "delete
+    /// selected"; see the `handle_key` doc comment for the
+    /// deviation rationale.
+    show_dashboard: bool,
 }
 
 impl App {
@@ -110,6 +124,7 @@ impl App {
             sort_mode: SortMode::Default,
             log: ActionLog::default(),
             show_log: false,
+            show_dashboard: false,
         }
     }
 
@@ -259,7 +274,9 @@ impl App {
                 ])
                 .split(f.size());
             draw_header(f, chunks[0]);
-            if self.show_log {
+            if self.show_dashboard {
+                draw_dashboard(f, self, chunks[1]);
+            } else if self.show_log {
                 draw_log_view(f, self, chunks[1]);
             } else {
                 let body_chunks = Layout::default()
@@ -285,12 +302,42 @@ impl App {
         match key.code {
             KeyCode::Char('q') | KeyCode::Esc => self.quit = true,
             KeyCode::Char('l') => {
-                // Toggle the log view.  In the log view, `q`/`Esc`
-                // still quit (matching the rest of the TUI), and
-                // `l` again returns to the items view.
+                // Toggle the log view.  Mutually exclusive with
+                // `D` (dashboard): pressing `l` while in the
+                // dashboard exits dashboard; pressing `D` while
+                // in the log exits log.  This guarantees at most
+                // one view flag is set at any time, so `render()`
+                // doesn't have to worry about precedence.
                 self.show_log = !self.show_log;
+                if self.show_log {
+                    self.show_dashboard = false;
+                }
                 self.status = if self.show_log {
                     format!("Showing log ({} entries). l=items, q=quit.", self.log.len())
+                } else {
+                    "Back to items.".to_string()
+                };
+            }
+            KeyCode::Char('D') => {
+                // Toggle the disk-usage dashboard view.  Lowercase
+                // `d` is reserved for "delete selected"; see the
+                // module-level doc comment for the binding
+                // deviation rationale.  Mutually exclusive with
+                // `l` (log): pressing `D` clears `show_log` so
+                // only one of the two overlay views is ever set.
+                self.show_dashboard = !self.show_dashboard;
+                if self.show_dashboard {
+                    self.show_log = false;
+                }
+                let row_count = if self.show_dashboard {
+                    self.items.len()
+                } else {
+                    0
+                };
+                self.status = if self.show_dashboard {
+                    format!(
+                        "Dashboard ({row_count} item(s) scanned). D=items, l=log, q=quit."
+                    )
                 } else {
                     "Back to items.".to_string()
                 };
@@ -637,7 +684,7 @@ fn draw_header(f: &mut ratatui::Frame, area: Rect) {
                 .fg(Color::Cyan)
                 .add_modifier(Modifier::BOLD),
         ),
-        Span::raw("  s=sort  l=log  a=select all  d=delete  r=rescan  q=quit"),
+        Span::raw("  s=sort  l=log  a=select all  d=delete  D=dashboard  r=rescan  q=quit"),
     ])])
     .block(Block::default().borders(Borders::BOTTOM));
     f.render_widget(header, area);
@@ -784,6 +831,107 @@ fn draw_log_view(f: &mut ratatui::Frame, app: &App, area: Rect) {
     f.render_widget(widget, area);
 }
 
+/// Render the per-engine disk-usage dashboard (more.md §4.1).
+///
+/// The view is a single bordered `Paragraph` whose body is the
+/// [`Dashboard::format_text`] output.  Computing the dashboard
+/// once per frame is cheap (~10 items even on a noisy host)
+/// so we do not cache it; the same `Dashboard::compute` call
+/// is also used by the CLI's `dashboard` subcommand and the
+/// GUI's landing page so the rendering is consistent across
+/// all three surfaces.
+///
+/// A footer line summarises the grand total when at least one
+/// engine reported items, matching the CLI's output.  Empty
+/// scans render "(no prunable items found)" so the user is
+/// never left staring at a blank panel.
+fn draw_dashboard(f: &mut ratatui::Frame, app: &App, area: Rect) {
+    let dash = Dashboard::compute_items(&app.items);
+    let body = if dash.rows.is_empty() {
+        "(no prunable items found)".to_string()
+    } else {
+        let mut text = dash.format_text();
+        let total: i64 = dash.grand_total() as i64;
+        text.push_str(&format!(
+            "Total across {} engine(s): {}\n",
+            dash.rows.len(),
+            format_size(total, true)
+        ));
+        text
+    };
+    let title = format!(
+        "Disk usage dashboard ({} engine(s), press D to go back)",
+        dash.rows.len()
+    );
+    // Truncate each line of `body` to the visible frame width so
+    // the column-aligned rows produced by `Dashboard::format_text`
+    // survive any terminal width.  Earlier shipped behaviour
+    // either overflowed horizontally (no `.wrap(...)`) or split a
+    // row across two visual lines (with `.wrap(Wrap { trim: false })`);
+    // both options destroyed the table layout on frames narrower
+    // than the longest row.  Truncation preserves column alignment
+    // across the header, divider, and every row at the cost of
+    // showing a clipped top-item name with an ellipsis on narrow
+    // frames.  The trade-off is documented in `more.md` §4.1
+    // "Implementation notes (deviations)".
+    let max_w = area.width.saturating_sub(2) as usize; // Account for borders.
+    let body = truncate_to_width_lines(&body, max_w);
+    let widget = Paragraph::new(body).block(Block::default().borders(Borders::ALL).title(title));
+    f.render_widget(widget, area);
+}
+
+/// Truncate each line of `s` to at most `max_width` Unicode
+/// characters, appending `\u{2026}` (ellipsis) on overflow.  Lines
+/// shorter than `max_width` are returned unchanged.  Used by
+/// `draw_dashboard` so the column-aligned table produced by
+/// `Dashboard::format_text` fits any frame width without splitting
+/// rows mid-line.
+///
+/// **Why a separate helper?**  `ratatui::Paragraph` does not expose
+/// a build-time width clip; without truncation the text overflows
+/// the frame buffer on narrow terminals, and without `Wrap` the
+/// same row can be split across two visual lines.  Both behaviours
+/// are documented regressions of the §4.1 dashboard.  The helper
+/// preserves alignment per-line by clipping at the right edge with
+/// an ellipsis, which is the same UX the CLI's `format!` table
+/// would produce if its viewport was narrower than its columns.
+///
+/// **Trailing-newline behaviour.**  The implementation uses
+/// `str::lines`, which splits the input at every `\n` and yields
+/// each line *without* its terminator.  Two consequences:
+///   * A trailing `\n` is silently dropped — `"\n"` yields `[""]`
+///     (one empty line) which rejoins as `""`, so the input
+///     ending in `\n` is returned with no trailing newline.
+///   * A pair of trailing `\n`s (`"\n\n"`) yields `["", ""]`
+///     (the intermediate empty span is preserved, only the final
+///     terminator is silently dropped); the helper rejoins this
+///     as `"\n"`.
+/// In general, *intermediate* empty lines between two `\n`s are
+/// preserved end-to-end.  `ratatui::Paragraph` does not require a
+/// trailing newline, and `draw_dashboard` does not depend on one,
+/// so the asymmetry is harmless at the only call site.  A future
+/// caller that renders into a tool which *does* depend on a
+/// trailing newline should append one manually.
+fn truncate_to_width_lines(s: &str, max_width: usize) -> String {
+    if max_width == 0 {
+        return String::new();
+    }
+    s.lines()
+        .map(|line| {
+            let count = line.chars().count();
+            if count <= max_width {
+                line.to_string()
+            } else {
+                let keep = max_width.saturating_sub(1);
+                let mut out: String = line.chars().take(keep).collect();
+                out.push('\u{2026}');
+                out
+            }
+        })
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
 // ---------------------------------------------------------------------------
 // Tests
 // ---------------------------------------------------------------------------
@@ -836,6 +984,7 @@ mod tests {
             sort_mode: SortMode::Default,
             log: ActionLog::default(),
             show_log: false,
+            show_dashboard: false,
         }
     }
 
@@ -1012,5 +1161,151 @@ mod tests {
         app.delete_errors
             .insert(("docker".to_string(), "a".to_string()), "boom".to_string());
         assert_eq!(app.cursor_info(), "Error: boom");
+    }
+
+    // --- truncate_to_width_lines helper ---
+
+    #[test]
+    fn truncate_to_width_lines_empty_input_is_empty_string() {
+        // `""`:  no lines, no output.
+        assert_eq!(truncate_to_width_lines("", 10), "");
+        // `"\n"`: a single line consisting of just the terminator,
+        // which `str::lines` yields as the empty string `""` and
+        // which re-emits unchanged.  After `join("\n")` the result
+        // is the empty string.  We deliberately do NOT exercise
+        // `"\n\n"` here because that case yields `["", ""]` (two
+        // empty lines, since `str::lines` preserves intermediate
+        // empty spans) and rejoins as `"\n"`; that asymmetry is
+        // covered by `truncate_to_width_lines_preserves_intermediate_empty_line`.
+        assert_eq!(truncate_to_width_lines("\n", 10), "");
+    }
+
+    #[test]
+    fn truncate_to_width_lines_exact_fit_is_unchanged() {
+        // Line length equals `max_width` exactly: no truncation,
+        // no ellipsis appended (the spec'd behaviour so a frame
+        // sized to the dashboard table shows every column intact).
+        assert_eq!(truncate_to_width_lines("hello", 5), "hello");
+    }
+
+    #[test]
+    fn truncate_to_width_lines_short_line_is_unchanged() {
+        assert_eq!(truncate_to_width_lines("hi", 10), "hi");
+    }
+
+    #[test]
+    fn truncate_to_width_lines_overflow_by_one_appends_ellipsis() {
+        // 6 chars, max 5 → keep first 4 + ellipsis = 5 visible chars
+        assert_eq!(truncate_to_width_lines("abcdef", 5), "abcd\u{2026}");
+    }
+
+    #[test]
+    fn truncate_to_width_lines_overflow_by_many_appends_ellipsis() {
+        // 20 chars, max 6 → keep first 5 + ellipsis = 6 visible chars
+        assert_eq!(
+            truncate_to_width_lines("abcdefghijklmnopqrst", 6),
+            "abcde\u{2026}"
+        );
+    }
+
+    #[test]
+    fn truncate_to_width_lines_zero_width_returns_empty_string() {
+        // No room for any character, including the ellipsis.
+        assert_eq!(truncate_to_width_lines("abc", 0), "");
+        assert_eq!(truncate_to_width_lines("", 0), "");
+    }
+
+    #[test]
+    fn truncate_to_width_lines_width_one_returns_only_ellipsis() {
+        // `max_width = 1`: keep 0 chars (saturating_sub(1)) +
+        // ellipsis = exactly 1 visible char.  Pin this so a future
+        // refactor that switches to `chars().take(max_width)` does
+        // not regress to dropping the ellipsis entirely.
+        assert_eq!(truncate_to_width_lines("abc", 1), "\u{2026}");
+    }
+
+    #[test]
+    fn truncate_to_width_lines_counts_chars_not_bytes() {
+        // `\u{00bd}` is 2 chars, 3 bytes.  If we counted by bytes
+        // (an easy regression) `byte_count = 3` and we'd truncate
+        // even at `max_width = 2`.  Char-counting keeps the line
+        // intact.
+        assert_eq!(truncate_to_width_lines("\u{00bd}\u{00bd}", 2), "\u{00bd}\u{00bd}");
+        // 3 chars, max 2 → keep first char + ellipsis = 2 visible chars.
+        assert_eq!(
+            truncate_to_width_lines("\u{00bd}\u{00bd}\u{00bd}", 2),
+            "\u{00bd}\u{2026}"
+        );
+    }
+
+    #[test]
+    fn truncate_to_width_lines_preserves_per_line_alignment_in_line_set() {
+        // A typical dashboard body: header + divider + a row.  Each
+        // line must be clipped to the same width so column alignment
+        // survives; the divider matching the header is what makes
+        // the table readable.
+        //
+        // With `max_w = 9` every line is longer than 9 chars, so
+        // each gets clipped to its first 8 chars plus an ellipsis,
+        // giving a consistent 9-char visual width per line.
+        // The expected values are computed from first principles
+        // (`take(max_w - 1)` + ellipsis), not eyeballed; recompute
+        // them before editing this test.
+        let body = "Engine       Items       Total  Top item\n----  ------  ---------  --------\ndocker           5     4.0 GiB  sample";
+        let clipped = truncate_to_width_lines(body, 9);
+        assert_eq!(
+            clipped,
+            // Engine   (6 + 2 spaces, then ellipsis) =
+            // ----  --  (4 dashes + 2 spaces + 2 dashes, then ellipsis) =
+            // docker   (6 + 2 spaces, then ellipsis) =
+            "Engine  \u{2026}\n----  --\u{2026}\ndocker  \u{2026}",
+            "every line clipped to 9 chars (8 + ellipsis) with right-edge ellipsis"
+        );
+    }
+
+    #[test]
+    fn truncate_to_width_lines_preserves_intermediate_empty_line() {
+        // `str::lines` yields a span for *every* gap between `\n`
+        // characters, including empty gaps, so a single intermediate
+        // empty line round-trips through the helper.  Joining `n`
+        // items with a 1-char separator produces `n − 1` separators,
+        // so the output reproduces the input's exact `\n` count.
+        // This test pins that round-trip behaviour so a future
+        // refactor that switches to `split('\n').filter(...)` or
+        // strips empty spans is caught here.
+        //
+        // Concretely:
+        //   * `"a\n\nb"` has 2 `\n` chars; `lines()` yields
+        //     `["a", "", "b"]`; `join("\n")` reproduces
+        //     `"a" + "\n" + "" + "\n" + "b"` = `"a\n\nb"`.
+        //   * `"a\n\n\nb"` has 3 `\n` chars; `lines()` yields
+        //     `["a", "", "", "b"]`; `join("\n")` reproduces
+        //     `"a" + "\n" + "" + "\n" + "" + "\n" + "b"`
+        //     = `"a\n\n\nb"`.
+        assert_eq!(truncate_to_width_lines("a\n\nb", 10), "a\n\nb");
+        assert_eq!(truncate_to_width_lines("a\n\n\nb", 10), "a\n\n\nb");
+    }
+
+    #[test]
+    fn truncate_to_width_lines_drops_trailing_newline() {
+        // `str::lines` consumes the *trailing* empty line but
+        // preserves *intermediate* empty lines, so a single
+        // trailing `\n` is dropped (the span before the `\n` is
+        // yielded, the span after is empty and consumed) while a
+        // pair of trailing `\n`s leaves one empty line in the
+        // output (the span between the two `\n`s is yielded).
+        // This is the exact asymmetry documented in the helper's
+        // doc comment, and pinning it here is the whole point of
+        // adding the test.
+        assert_eq!(
+            truncate_to_width_lines("abc\n", 10),
+            "abc",
+            "single trailing \\n drops cleanly"
+        );
+        assert_eq!(
+            truncate_to_width_lines("abc\n\n", 10),
+            "abc\n",
+            "pair of trailing \\n\\n leaves one empty line in output"
+        );
     }
 }
