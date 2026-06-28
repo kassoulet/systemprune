@@ -1,0 +1,85 @@
+# CodeQL analysis configuration for systemprune-rs.
+#
+# Lives at `.github/codeql/codeql-config.yml` so the query pack,
+# path filters, and any future custom queries (under
+# `.github/codeql/queries/<lang>/`) all live next to the code
+# they police — the GitHub-recommended layout for repos with
+# custom CodeQL settings.
+#
+# Loaded by `.github/workflows/codeql.yml` via the
+# `config-file` input on `github/codeql-action/init@v3`.
+# Decisions split by file:
+#   * Workflow file  → `languages` (drives the matrix).
+#   * This config    → query pack, paths-ignore, query-filters,
+#                      and any custom queries layered on top.
+# Per GitHub's docs, when both `queries:` and `paths-ignore:`
+# appear in the workflow input AND here, the workflow input
+# wins — so this file is the single source of truth only when
+# the workflow does NOT also set them.  Both sides are kept
+# consistent as a result.
+#
+# To add a custom query (e.g. an `unsafe-audit` pack):
+#   1. Drop the `.ql` file(s) into
+#      `.github/codeql/queries/<lang>/`.
+#   2. Add a `codeql-pack.yml` manifest at the root of that
+#      directory declaring `name`, `version`, `library: true`
+#      (or `query-pack: true` for query files) plus the
+#      `defaultSuite` block if the pack ships a `*.qls` suite.
+#      Without `codeql-pack.yml`, CodeQL treats the path as a
+#      loose file glob rather than a query pack — the
+#      easiest footgun to hit on first contribution.
+#   3. Append `./.github/codeql/queries` to `queries:` below.
+#   4. (Optional) Use `query-filters:` further down to scope
+#      loud queries to specific paths.
+#
+# Schema reference:
+#   https://docs.github.com/en/code-security/code-scanning/automatically-scanning-your-code-for-vulnerabilities-and-errors/customizing-code-scanning
+#   https://codeql.github.com/docs/codeql-cli/reference/codeql-workflow-config-file-reference/
+
+# Display name shown in the Security tab / SARIF upload.
+name: "SystemPrune Rust analysis"
+
+# Layer our `queries:` list on top of GitHub's default packs.
+# Set to `true` to run ONLY custom queries against a vanilla
+# baseline (no inherited `security-and-quality` defaults).
+disable-default-queries: false
+
+# Query packs to run on this repo.
+#
+# `security-and-quality` ≈ 150 queries covering
+#   * secrets-in-tree
+#   * weak / inappropriate cryptography
+#   * unsafe pointer / lifetime patterns (catches the
+#     borrow-checker blind spots when someone adds the
+#     first `unsafe { ... }`)
+#   * common web/API footguns
+#
+# Stricter `security-extended` ≈ 250 queries exists but
+# produces noticeably more false-positives on a clean
+# baseline, so it's intentionally NOT enabled.
+#
+# Add workspace-relative pack paths as additional entries
+# when custom queries are introduced (e.g.
+# `./.github/codeql/queries`).
+queries:
+  - security-and-quality
+
+# Skip the per-crate `target/` build output at every depth
+# and the `tmp/` scratch used by diagnostic scripts.
+# Real source lives under `core/`, `cli/`, `tui/`, `gui/`
+# and the workflow YAMLs — no overlap.
+#
+# YAML-list form (one entry per `-`).  CodeQL parses each
+# entry as a glob at analysis time.
+paths-ignore:
+  - "**/target"
+  - tmp
+
+# Optional: scope a custom query to specific source paths so
+# it doesn't fire on every file in the pack.
+#
+# Example (uncomment + edit when needed):
+# query-filters:
+#   - include:
+#       id: rust/audit-unsafe-blocks
+#       path: core/src

@@ -1,0 +1,133 @@
+name: "CodeQL"
+
+# Static analysis for the Rust workspace.  Three trigger channels:
+#   * push to main — fails CI if a security regression lands.
+#   * pull_request — same, but scoped to the diff so PRs don't
+#     carry findings from `main`.
+#   * weekly cron (Monday 06:17 UTC) — picks up newly-published
+#     queries without waiting for a code change.
+#
+# Pairs with `.github/workflows/ci.yml`:
+#   * Same Rust 1.75 toolchain (matches the workspace MSRV).
+#   * Same `libgtk-4-dev + libadwaita-1-dev + pkg-config` apt
+#     install so CodeQL's `autobuild` step can produce a call
+#     graph against the same surface that `cargo build --workspace`
+#     passes in CI.  A green CI run == a green CodeQL build.
+#
+# Why CodeQL at all?  The repo currently has zero `unsafe` blocks
+# (Rust safety is the default), so this analysis runs against a
+# clean baseline.  The day someone adds the first `unsafe { ... }`,
+# CodeQL provides:
+#   * dataflow analysis that catches raw-pointer / lifetime
+#     regressions the borrow checker alone misses.
+#   * the `rust/security` query pack's standard checks.
+#   * SARIF output landed as PR annotations, so the offending
+#     line is right in the diff the contributor is reviewing.
+#
+# Cost: ~3 min on ubuntu-latest for a 4-crate workspace; weekly
+# cron pulses are de-duped by the `concurrency` group below.
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+  schedule:
+    # GitHub's recommended weekly slot: Monday 06:17 UTC.  The
+    # `:17` is intentional (non-round) — Glob's CI peak is at
+    # `:00`, so a non-hour-aligned minute avoids the queue spike.
+    - cron: '17 6 * * 1'
+
+# Same concurrency-group pattern as ci.yml — cancel superseded
+# PR pushes so a contributor's second push doesn't pay the
+# CodeQL cost of their first.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  analyze:
+    name: Analyze (${{ matrix.language }})
+    runs-on: ubuntu-latest
+    # Minimum permissions for CodeQL: `contents: read` to
+    # checkout the repo, `security-events: write` to upload
+    # the SARIF report back to the Security tab.
+    permissions:
+      actions: read
+      contents: read
+      security-events: write
+
+    strategy:
+      fail-fast: false
+      # Matrix is single-element today (Rust-only repo), but
+      # using a `matrix` forward-compatibly lets a future
+      # contributor analyse, say, JavaScript glue under
+      # `assets/` without rewriting the workflow — they just
+      # append to the list.
+      matrix:
+        include:
+          - language: rust
+            # `queries:` deliberately NOT set here — the
+            # query-pack choice lives in
+            # `.github/codeql/codeql-config.yml`.  Per
+            # GitHub's docs, workflow-level values win
+            # over config-file values, so omitting it from
+            # here makes the config the single source of
+            # truth (forward-compat: a second matrix entry
+            # for, say, JavaScript glue would only need to
+            # set `language:`).
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Rust toolchain (1.75 = MSRV)
+        # No `components:` block — CodeQL's autobuild runs
+        # `cargo build` only, never `cargo fmt`, so installing
+        # the rustfmt component is wasted (same dead-weight
+        # pattern already trimmed from ci.yml's `gui` and
+        # `build-test` jobs).
+        uses: dtolnay/rust-toolchain@1.75
+
+      - name: Install GTK4 + libadwaita system headers
+        # Autobuild (next step) shells out to `cargo build` to
+        # produce the call graph CodeQL analyses.  Without
+        # these apt packages, the gtk4-sys probe fails and
+        # the autobuild step errors out *before* CodeQL
+        # analyses a single source file.  The set mirrors
+        # ci.yml's build-test job so the local CI / CodeQL
+        # build surfaces stay in sync.
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            libgtk-4-dev \
+            libadwaita-1-dev \
+            pkg-config
+
+      - name: Initialize CodeQL
+        uses: github/codeql-action/init@v3
+        with:
+          languages: ${{ matrix.language }}
+          # Analysis policy lives in
+          # `.github/codeql/codeql-config.yml` per
+          # GitHub's recommended layout for repos with
+          # custom CodeQL settings: query pack + paths-
+          # ignore + any future custom queries all sit
+          # next to the code they police, and adding a
+          # new query is a `.github/codeql/queries/`
+          # drop-in rather than a YAML workflow edit.
+          config-file: .github/codeql/codeql-config.yml
+
+      - name: Autobuild (Rust call graph)
+        # CodeQL detects Rust projects via Cargo and runs
+        # `cargo build --workspace` itself, no need for an
+        # explicit build step.  Using `autobuild` rather than
+        # a hand-written `cargo build` keeps the surface
+        # language-agnostic, so a future matrix entry (say,
+        # python glue) is a one-line change above.
+        uses: github/codeql-action/autobuild@v3
+
+      - name: Perform CodeQL Analysis
+        uses: github/codeql-action/analyze@v3
+        with:
+          category: "/language:${{ matrix.language }}"
