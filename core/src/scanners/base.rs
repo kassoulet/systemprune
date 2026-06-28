@@ -48,6 +48,9 @@ impl BaseScanner {
         }
         let owned: Vec<String> = argv.iter().map(|s| s.to_string()).collect();
         let mut cmd = Command::new(argv[0]);
+        // Security: Ensure the child process is killed if the future
+        // is dropped (e.g. on timeout).
+        cmd.kill_on_drop(true);
         for arg in &argv[1..] {
             cmd.arg(arg);
         }

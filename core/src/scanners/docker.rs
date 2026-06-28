@@ -101,10 +101,11 @@ impl Scanner for DockerScanner {
 
     async fn delete_item(&self, item: &PrunableItem) -> Result<(), EngineError> {
         let argv: Vec<&str> = match item.category {
-            Category::Image => vec!["docker", "rmi", "-f", &item.id],
-            Category::Container => vec!["docker", "rm", "-f", &item.id],
-            Category::Volume => vec!["docker", "volume", "rm", &item.id],
-            Category::Network => vec!["docker", "network", "rm", &item.id],
+            // Security: Use `--` to prevent the ID from being interpreted as a flag.
+            Category::Image => vec!["docker", "rmi", "-f", "--", &item.id],
+            Category::Container => vec!["docker", "rm", "-f", "--", &item.id],
+            Category::Volume => vec!["docker", "volume", "rm", "--", &item.id],
+            Category::Network => vec!["docker", "network", "rm", "--", &item.id],
             other => {
                 return Err(EngineError::new(
                     format!("unsupported docker category: {:?}", other),

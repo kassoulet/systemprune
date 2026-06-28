@@ -62,7 +62,8 @@ impl Scanner for SnapScanner {
             ));
         }
         self.base
-            .run(&["snap", "remove", &item.id], TIMEOUT_SECS)
+            // Security: Use `--` to prevent the ID from being interpreted as a flag.
+            .run(&["snap", "remove", "--", &item.id], TIMEOUT_SECS)
             .await
             .map(|_| ())
     }
