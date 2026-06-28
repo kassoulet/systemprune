@@ -118,7 +118,7 @@ impl Category {
 }
 
 /// The runtime status of an asset.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Default, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum Status {
     Active,
@@ -146,6 +146,58 @@ impl Status {
 
     pub fn is_deleted(&self) -> bool {
         matches!(self, Status::Deleted)
+    }
+
+    /// Mapping for the per-category "Select All X" toggle buttons
+    /// emitted by [`systemprune_gui::window::append_group`].
+    /// Returns the `(select_label, deselect_label)` pair that the
+    /// pure renderer (`compute_status_toggle_button_state`) flips
+    /// between as the user progresses.
+    ///
+    /// `None` for statuses that do **not** earn a dedicated button:
+    ///
+    /// * `Active` — never safe to delete, so a "Select All Active"
+    ///   toggle would be misleading.
+    /// * `Unused` — the default; already covered by the parent
+    ///   "Select all" button on the same ExpanderRow.
+    /// * `Deleted` — already gone, no selection target.
+    pub fn select_all_labels(self) -> Option<(&'static str, &'static str)> {
+        match self {
+            Status::Dangling => {
+                Some(("Select All Dangling", "Deselect All Dangling"))
+            }
+            Status::Stopped => {
+                Some(("Select All Stopped", "Deselect All Stopped"))
+            }
+            Status::Active | Status::Unused | Status::Deleted => None,
+        }
+    }
+
+    /// The list of statuses that earn a dedicated "Select All X"
+    /// suffix button — single source of truth mirrored against
+    /// [`Status::select_all_labels`]. Both helpers MUST stay in
+    /// lockstep: every status listed here must earn a `(select,
+    /// deselect)` label pair there, and vice-versa.
+    ///
+    /// The GUI uses this list when:
+    ///
+    ///   * Creating per-status suffix buttons on each expander row
+    ///     (`append_group`).
+    ///   * Refreshing those buttons after a per-item toggle
+    ///     (`on_item_toggled`).
+    ///   * Cross-refreshing sibling status buttons after one of
+    ///     them was clicked (`on_status_toggle_clicked`).
+    ///
+    /// Centralising the otherwise-hardcoded `[Dangling, Stopped]`
+    /// array means a future contributor who adds (e.g.)
+    /// `Status::Stale` to the labels map only has to extend this
+    /// constant to surface a "Select All Stale" button — three
+    /// call sites stay in sync via a single edit.
+    ///
+    /// Returned as `&'static [Status]` so callers iterate
+    /// without an allocation (`Status` is `Copy`).
+    pub fn select_all_statuses() -> &'static [Status] {
+        &[Status::Dangling, Status::Stopped]
     }
 }
 

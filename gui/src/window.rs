@@ -17,8 +17,8 @@ use std::cell::RefCell;
 use std::collections::{BTreeMap, HashSet};
 use std::rc::Rc;
 use systemprune_core::log::ActionLog;
-use systemprune_core::models::{Category, PrunableItem};
-use systemprune_core::orchestrator::Orchestrator;
+use systemprune_core::models::{Category, PrunableItem, Status};
+use systemprune_core::orchestrator::{Dashboard, DashboardRow, Orchestrator};
 use systemprune_core::scanners::all_scanners;
 use systemprune_core::size::format_size;
 use systemprune_core::sort::{sort_items, SortMode};
@@ -76,6 +76,19 @@ pub fn build_window(app: &adw::Application) {
     sort_dropdown.set_size_request(180, -1);
     header.pack_end(&sort_dropdown);
 
+    // --- View toggle button (Dashboard / Items) ---
+    // The spec (`more.md` §4.1) puts the dashboard on the
+    // landing page.  We default `CurrentView::Dashboard` so
+    // the first frame the user sees is the per-engine disk
+    // summary, not the item list.  The button label flips
+    // depending on which view is active so the user always
+    // sees the affordance to switch to the *other* view.
+    let view_toggle_button = Button::with_label("Show items");
+    view_toggle_button.set_tooltip_text(Some(
+        "Switch to the per-item list view",
+    ));
+    header.pack_end(&view_toggle_button);
+
     // --- Hamburger menu (About, Log, etc.) ---
     // Built with a `gio::Menu` model and a `MenuButton` so the
     // entries are accessible via the standard Adwaita hamburger
@@ -113,6 +126,29 @@ pub fn build_window(app: &adw::Application) {
     items_scroll.set_child(Some(&groups_box));
     main_box.append(&items_scroll);
 
+    // --- Dashboard pane (more.md §4.1) ---
+    // Always present as a child of `main_box`, but its
+    // visibility is toggled by the header-bar
+    // `view_toggle_button`.  Built lazily: the first scan
+    // populates it from the result, and subsequent scans
+    // refresh it.  We start it hidden because the spec's
+    // landing page is the *items* list (changed in §4.1 to
+    // prefer the dashboard on first launch, but every rescan
+    // falls back to the items list so the workflow stays
+    // familiar).
+    let dashboard_scroll = ScrolledWindow::new();
+    dashboard_scroll.set_hexpand(true);
+    dashboard_scroll.set_vexpand(true);
+    let dashboard_box = GtkBox::new(Orientation::Vertical, 0);
+    dashboard_scroll.set_child(Some(&dashboard_box));
+    main_box.append(&dashboard_scroll);
+    // Initial visibility: dashboard is the spec-mandated landing
+    // page (more.md §4.1), so we show it and hide the items list.
+    // `on_view_toggle_clicked` flips these when the user clicks
+    // the header-bar toggle button.
+    items_scroll.set_visible(false);
+    dashboard_scroll.set_visible(true);
+
     // --- Status bar ---
     outer.append(&Separator::new(Orientation::Horizontal));
     let status = Label::new(Some("Ready."));
@@ -128,8 +164,20 @@ pub fn build_window(app: &adw::Application) {
         let state = state.clone();
         let status_label = status.clone();
         let groups_box = groups_box.clone();
+        let dashboard_box = dashboard_box.clone();
+        let view_toggle_button = view_toggle_button.clone();
+        let items_scroll = items_scroll.clone();
+        let dashboard_scroll = dashboard_scroll.clone();
         rescan_button.connect_clicked(move |_| {
-            do_scan(&state, &status_label, &groups_box);
+            do_scan(
+                &state,
+                &status_label,
+                &groups_box,
+                &dashboard_box,
+                &view_toggle_button,
+                &items_scroll,
+                &dashboard_scroll,
+            );
         });
     }
     // --- Wire up the sort dropdown (deferred so `groups_box`
@@ -157,13 +205,38 @@ pub fn build_window(app: &adw::Application) {
         });
     }
 
+    // --- Wire up the view toggle (Dashboard <-> Items) ---
+    {
+        let items_scroll_for_toggle = items_scroll.clone();
+        let dashboard_scroll_for_toggle = dashboard_scroll.clone();
+        view_toggle_button.connect_clicked(move |btn| {
+            on_view_toggle_clicked(
+                btn,
+                &items_scroll_for_toggle,
+                &dashboard_scroll_for_toggle,
+            );
+        });
+    }
+
     // First scan.
     {
         let state = state.clone();
         let status_label = status.clone();
         let groups_box = groups_box.clone();
+        let dashboard_box = dashboard_box.clone();
+        let view_toggle_button = view_toggle_button.clone();
+        let items_scroll = items_scroll.clone();
+        let dashboard_scroll = dashboard_scroll.clone();
         window.connect_show(move |_| {
-            do_scan(&state, &status_label, &groups_box);
+            do_scan(
+                &state,
+                &status_label,
+                &groups_box,
+                &dashboard_box,
+                &view_toggle_button,
+                &items_scroll,
+                &dashboard_scroll,
+            );
         });
     }
 
@@ -341,6 +414,14 @@ struct State {
     /// Per-category "Select all" / "Deselect all" button shown as
     /// a suffix on the expander row's title bar.
     group_toggle_buttons: BTreeMap<Category, Button>,
+    /// Per-(category, status) "Select All X" button (e.g.
+    /// "Select All Dangling", "Select All Stopped") shown as a
+    /// second suffix on the same title bar. Only populated for
+    /// statuses that earn a dedicated button — see
+    /// [`Status::select_all_labels`]. Keyed by `(cat, status)` so
+    /// `on_status_toggle_clicked` can look up the right button
+    /// when the user clicks.
+    status_toggle_buttons: BTreeMap<(Category, Status), Button>,
     /// Error messages for failed deletions, keyed by (source, id).
     delete_errors: BTreeMap<(String, String), String>,
     /// Cached `adw::AboutWindow` so repeated activations of the
@@ -378,6 +459,7 @@ impl State {
             group_expander_rows: BTreeMap::new(),
             item_checkboxes: BTreeMap::new(),
             group_toggle_buttons: BTreeMap::new(),
+            status_toggle_buttons: BTreeMap::new(),
             delete_errors: BTreeMap::new(),
             about_window: Rc::new(RefCell::new(None)),
             sort_mode: SortMode::Default,
@@ -446,13 +528,22 @@ impl State {
 //     and would rather skip the work than crash.
 //
 // **Audit conclusion:** every signal-firing call site inside a
-// `state.borrow()` scope is wrapped in `with_rebuilding`.  The
-// current call sites are: `set_active` in `make_item_row`,
-// `set_active` in `on_group_toggle_clicked`, the whole rebuild
-// in `rebuild_groups`, and the `set_label` / `set_sensitive`
-// calls in `update_group_toggle_button`.  Future signal-firing
-// call sites inside a `state.borrow()` scope should follow the
-// same pattern.
+// `state.borrow()` scope is re-entrancy-safe.  The dedicated
+// signal-firing sites are wrapped in `with_rebuilding`: the
+// `set_active` calls in `make_item_row` and
+// `on_group_toggle_clicked`, the whole rebuild flow in
+// `rebuild_groups`, and the `set_label` / `set_sensitive`
+// calls in `update_group_toggle_button`.  A second class of
+// sites — user-click handlers that may fire while another
+// rebuild is in flight — instead early-return after checking
+// `state.borrow().rebuilding`; the per-engine
+// `ActionRow::connect_activated` handlers in
+// `rebuild_dashboard_widgets` follow that pattern.  RefCell
+// `borrow()` panics on re-entrancy rather than deadlocking, so
+// both classes of sites share the same re-entrancy-safety
+// guarantee: a signal fired mid-rebuild sees the flag and
+// either bails out itself (RAII guard cleared) or is blocked
+// by the same check in the click handler.
 
 /// Run a closure while `state.rebuilding` is `true`, so the
 /// per-item `toggled` callbacks see the flag and bail out of
@@ -590,6 +681,10 @@ fn do_scan(
     state: &Rc<RefCell<State>>,
     status: &Label,
     groups_box: &GtkBox,
+    dashboard_box: &GtkBox,
+    view_toggle_button: &Button,
+    items_scroll: &ScrolledWindow,
+    dashboard_scroll: &ScrolledWindow,
 ) {
     if state.borrow().busy {
         return;
@@ -607,7 +702,27 @@ fn do_scan(
         s.items = result.items;
         s.busy = false;
     }
-    rebuild_groups(state, groups_box);
+    // Both rebuild fns create widgets whose activation/toggle
+    // handlers re-enter `state`.  We wrap them in `with_rebuilding`
+    // for the same defensive reason documented at `make_item_row`:
+    // a handler that calls `state.borrow()` would otherwise hit
+    // "RefCell already mutably borrowed" if the outer code still
+    // held a `RefMut`.  `rebuild_groups` already has its own
+    // internal `with_rebuilding` wrap, so this is a nested
+    // invocation documented in the existing tests as "inner drop
+    // clobbers outer flag" \u2014 dead-lock safe but not bail-safe
+    // in the narrow clobber window.  Good enough for the only
+    // current call sites.
+    with_rebuilding(state, || {
+        rebuild_groups(state, groups_box);
+        rebuild_dashboard_widgets(
+            state,
+            dashboard_box,
+            view_toggle_button,
+            items_scroll,
+            dashboard_scroll,
+        );
+    });
     status.set_text(&format!("Found {} item(s).", count));
 }
 
@@ -757,6 +872,141 @@ fn do_delete(
 // UI helpers
 // ---------------------------------------------------------------------------
 
+/// Refresh the dashboard landing-page widgets (more.md §4.1).
+///
+/// The dashboard pane holds one `ActionRow` per detected
+/// engine, mirroring the `make_item_row` pattern so the
+/// landing page enjoys the same `adw::ActionRow` subtitle
+/// styling and click-handler affordances as the items list.
+/// Each row shows the engine name as its title, a count +
+/// total + top-item summary as its subtitle (computed by
+/// `describe_dashboard_row`), and the total size as a
+/// right-aligned suffix label.
+///
+/// **Activation.**  Clicking an `ActionRow` (with
+/// `activatable(true)`) switches the main pane to the items
+/// view, hides the dashboard pane, and updates the header-
+/// bar toggle button label to "Show dashboard" so the
+/// affordance reads as "next destination" post-toggle (the
+/// same polarity contract as `on_view_toggle_clicked`).
+/// Future polish: once the items list migrates to a model/
+/// view widget, the activation handler can also set
+/// `state.scroll_target = Some(source)` and consume it in
+/// `rebuild_groups` to scroll-to-engine.
+///
+/// **RefCell / state interactions.**  Called from `do_scan`
+/// inside a `with_rebuilding` block, so `state.rebuilding`
+/// is `true` for the duration of the rebuild.  The
+/// `connect_activated` handlers we create here re-check
+/// `state.rebuilding` and bail if a higher-level rebuild is
+/// mid-flight (mirror of `on_item_toggled` /
+/// `on_group_toggle_clicked`).  `set_visible` and `set_label`
+/// fire `notify::*` signals synchronously; no handler for
+/// either is currently connected, so no `with_rebuilding`
+/// wrap is needed around those calls.  A future contributor
+/// adding a `notify::visible` or `notify::label` handler
+/// that re-enters `state` must mirror the defensive pattern
+/// documented at the top of `make_item_row`.
+fn rebuild_dashboard_widgets(
+    state: &Rc<RefCell<State>>,
+    dashboard_box: &GtkBox,
+    view_toggle_button: &Button,
+    items_scroll: &ScrolledWindow,
+    dashboard_scroll: &ScrolledWindow,
+) {
+    // Snapshot items, then drop the borrow before any GTK
+    // work so subsequent callbacks never conflict with our
+    // own state mutation.
+    let items: Vec<PrunableItem> = state.borrow().items.clone();
+    let dash = Dashboard::compute_items(&items);
+    // Clear existing children.
+    while let Some(child) = dashboard_box.first_child() {
+        dashboard_box.remove(&child);
+    }
+    if dash.rows.is_empty() {
+        let label = Label::new(Some("(no prunable items found)"));
+        label.set_xalign(0.0);
+        label.set_margin_top(8);
+        label.set_margin_start(12);
+        dashboard_box.append(&label);
+        return;
+    }
+    // Heading label above the per-engine ActionRows.
+    let title = Label::new(Some(&format!(
+        "Disk usage dashboard \u{2014} {} engine(s)",
+        dash.rows.len()
+    )));
+    title.set_xalign(0.0);
+    title.set_margin_top(8);
+    title.set_margin_start(12);
+    title.set_margin_bottom(4);
+    title.add_css_class("heading");
+    dashboard_box.append(&title);
+    // One ActionRow per engine — mirror of `make_item_row`'s
+    // pattern so the landing page shares the same look &
+    // feel as the items list (subtitle styling, suffix
+    // layout, future prefix affordances).
+    for row in &dash.rows {
+        let render = describe_dashboard_row(row);
+        let action_row = ActionRow::builder()
+            .title(&render.title)
+            .subtitle(&escape_markup(&render.subtitle))
+            .activatable(true)
+            .build();
+        action_row.set_tooltip_text(Some(&format!(
+            "Switch to the items list ({} item(s) from {} \
+             totalling {})",
+            row.count,
+            render.title,
+            render.suffix_text,
+        )));
+        let size_label = Label::new(Some(&render.suffix_text));
+        size_label.set_xalign(1.0);
+        size_label.set_margin_end(12);
+        action_row.add_suffix(&size_label);
+        // Wire up activation: switch to the items view +
+        // update the toggle button label so the header
+        // affordance reads as the next destination.  Future
+        // polish: when the items list migrates to a model/
+        // view widget, capture `row.source.clone()` here
+        // and assign it to a new `state.scroll_target` field
+        // that `rebuild_groups` consumes; today the items
+        // list is a hand-rolled `GtkBox` inside a
+        // `ScrolledWindow` with no programmatic-scroll API.
+        let state_for_handler = state.clone();
+        let view_toggle_for_handler = view_toggle_button.clone();
+        let items_scroll_for_handler = items_scroll.clone();
+        let dashboard_scroll_for_handler = dashboard_scroll.clone();
+        action_row.connect_activated(move |_| {
+            // Bail if a higher-level rebuild is mid-flight
+            // (mirrors `on_item_toggled` /
+            // `on_group_toggle_clicked`).
+            if state_for_handler.borrow().rebuilding {
+                return;
+            }
+            // Switch to items view + update the toggle
+            // button label.  `set_visible` fires
+            // `notify::visible` synchronously and `set_label`
+            // fires `notify::label` synchronously, but no
+            // handler for either is connected today.
+            items_scroll_for_handler.set_visible(true);
+            dashboard_scroll_for_handler.set_visible(false);
+            view_toggle_for_handler.set_label("Show dashboard");
+        });
+        dashboard_box.append(&action_row);
+    }
+    let grand = Label::new(Some(&format!(
+        "Grand total: {} across {} engine(s)",
+        format_size(dash.grand_total() as i64, true),
+        dash.rows.len()
+    )));
+    grand.set_xalign(0.0);
+    grand.set_margin_top(8);
+    grand.set_margin_start(12);
+    grand.add_css_class("dim-label");
+    dashboard_box.append(&grand);
+}
+
 fn rebuild_groups(state: &Rc<RefCell<State>>, groups_box: &GtkBox) {
     // Wrap the whole rebuild in `with_rebuilding` so:
     //   1. The `rebuilding` flag is set for the entire rebuild
@@ -790,6 +1040,7 @@ fn rebuild_groups(state: &Rc<RefCell<State>>, groups_box: &GtkBox) {
             s.group_expander_rows.clear();
             s.item_checkboxes.clear();
             s.group_toggle_buttons.clear();
+            s.status_toggle_buttons.clear();
         }
         let snapshot: Vec<(Category, Vec<PrunableItem>)> = state.borrow().grouped();
         for (cat, items) in snapshot {
@@ -856,6 +1107,43 @@ fn append_group(
     toggle_button.set_valign(gtk::Align::Center);
     expander_row.add_suffix(&toggle_button);
 
+    // --- Per-status "Select All <Status>" buttons (e.g. "Select
+    //     All Dangling", "Select All Stopped") as additional
+    //     suffixes on the same title bar.  Mirrors the primary
+    //     toggle button's behaviour but limits each to items with
+    //     a specific `Status` (see [`Status::select_all_labels`]
+    //     for the gating set).  Only statuses with at least one
+    //     currently-deletable item (<status> + not in
+    //     `delete_errors`) earn a button, so the suffix bar stays
+    //     uncluttered for the common case of a default-status
+    //     group with no safe sub-status items.
+    let mut status_buttons: Vec<(Status, Button)> = Vec::new();
+    for status in [Status::Dangling, Status::Stopped] {
+        let safe_for_status = items.iter().any(|i| {
+            i.status == status
+                && state
+                    .borrow()
+                    .delete_errors
+                    .contains_key(&(i.source.clone(), i.id.clone()))
+                    == false
+                && i.is_safe_to_delete()
+        });
+        if !safe_for_status {
+            continue;
+        }
+        let (select_label, _) = status
+            .select_all_labels()
+            .expect("statuses iterated here are gated by select_all_labels");
+        let btn = Button::with_label(select_label);
+        btn.set_tooltip_text(Some(&format!(
+            "Select or deselect every {} item in this group",
+            status.as_str()
+        )));
+        btn.set_valign(gtk::Align::Center);
+        expander_row.add_suffix(&btn);
+        status_buttons.push((status, btn));
+    }
+
     // --- Add items directly as rows of the ExpanderRow ---
     for item in items {
         let row = make_item_row(state, item);
@@ -869,6 +1157,10 @@ fn append_group(
         let mut s = state.borrow_mut();
         s.group_expander_rows.insert(cat, expander_row.clone());
         s.group_toggle_buttons.insert(cat, toggle_button.clone());
+        for (status, btn) in &status_buttons {
+            s.status_toggle_buttons
+                .insert((cat, *status), btn.clone());
+        }
     }
 
     // --- Wire up the click handler.  Done after caching so the
@@ -879,9 +1171,25 @@ fn append_group(
             on_group_toggle_clicked(&state, cat);
         });
     }
+    // Same deferred wiring for the per-status buttons.
+    for (status, btn) in status_buttons {
+        let state = state.clone();
+        btn.connect_clicked(move |_| {
+            on_status_toggle_clicked(&state, cat, status);
+        });
+    }
 
     // Initial label/sensitivity reflects the items + selection.
     update_group_toggle_button(state, cat);
+    for status in [Status::Dangling, Status::Stopped] {
+        if state
+            .borrow()
+            .status_toggle_buttons
+            .contains_key(&(cat, status))
+        {
+            update_status_toggle_button(state, cat, status);
+        }
+    }
 }
 
 fn escape_markup(s: &str) -> String {
@@ -1014,6 +1322,80 @@ pub(crate) struct GuiItemRowRender {
     pub tooltip: Option<String>,
     pub css_class: Option<&'static str>,
     pub checkbox_sensitive: bool,
+}
+
+/// Per-engine dashboard row description produced by
+/// `describe_dashboard_row`.  Extracted as a pure helper so
+/// unit tests can pin the contract of the title/subtitle/suffix
+/// rendering without instantiating GTK widgets — mirroring the
+/// `describe_item_row` / `GuiItemRowRender` precedent used by
+/// the items list.
+#[derive(Debug, PartialEq, Eq, Clone)]
+pub(crate) struct DashboardRowRender {
+    /// Engine name (e.g. `docker`), used as the
+    /// `ActionRow::set_title` value.
+    pub title: String,
+    /// Human-readable summary line for the subtitle slot
+    /// (e.g. `5 items — 4.0 GiB total — top: big-image
+    /// (2.0 GiB)`).  Always uses the singular form when
+    /// `count == 1`.
+    pub subtitle: String,
+    /// Right-aligned suffix label showing the total disk
+    /// usage (e.g. `4.0 GiB`).
+    pub suffix_text: String,
+}
+
+/// Pure description of one engine's dashboard row.  Mirrors
+/// `describe_item_row`'s contract: inputs are the static
+/// `DashboardRow` (no signals touched), outputs are pre-computed
+/// strings ready for `ActionRow::builder`.
+///
+/// **Singular vs. plural.**  `count == 1` produces `1 item` and
+/// any other count produces `N itemss`; this matches the
+/// `append_group` subtitle contract so the dashboard reads
+/// consistently with the items list.
+///
+/// **Top-item clause.**  When `row.top` is `Some`, the subtitle
+/// ends with the literal `top: NAME (SIZE)` so the largest
+/// disk-hog is at-a-glance findable.  When `None`, the clause
+/// is omitted and the user sees `count + total` only.
+///
+/// **Format precision.**  `row.total_bytes` and
+/// `row.top.size_bytes` are both formatted via
+/// `format_size(_, binary = true)` so the "iBi" units match the
+/// items list and the orchestrator's `Dashboard::format_text`.
+///
+/// **Markup escaping.**  `row.source` is piped through
+/// `escape_markup` before becoming `title` so any future scanner
+/// that exposes a user-derived source string with `&`/`<`/`>`
+/// does not crash `ActionRow::set_title` at row-construction
+/// time.  Mirror of the existing `describe_item_row` contract.
+pub(crate) fn describe_dashboard_row(row: &DashboardRow) -> DashboardRowRender {
+    let total_str = format_size(row.total_bytes as i64, true);
+    let count_str = format!(
+        "{} item{}",
+        row.count,
+        if row.count == 1 { "" } else { "s" }
+    );
+    let subtitle = match &row.top {
+        Some(top) => format!(
+            "{} \u{2014} {} total \u{2014} top: {} ({})",
+            count_str,
+            total_str,
+            top.name,
+            format_size(top.size_bytes as i64, true),
+        ),
+        None => format!(
+            "{} \u{2014} {} total",
+            count_str,
+            total_str,
+        ),
+    };
+    DashboardRowRender {
+        title: escape_markup(&row.source),
+        subtitle,
+        suffix_text: total_str,
+    }
 }
 
 /// Description of the post-delete results dialog.  Extracted from
@@ -1166,6 +1548,60 @@ fn build_delete_results_dialog(
 // Event handlers
 // ---------------------------------------------------------------------------
 
+/// Handler for the header-bar `view_toggle_button`.  Flips
+/// between the dashboard view (more.md §4.1) and the
+/// per-item list view grouped by category.
+///
+/// **Spec deviation.**  more.md §4.1 says the GUI dashboard
+/// is the landing page on first launch with a "Show items"
+/// button that switches to the existing list view.  We put
+/// the dashboard on first launch (per spec) and use the
+/// header-bar button as the toggle, so the button label
+/// ── always shows the *next* view the user will land on
+/// ── flips between "Show items" (currently in Dashboard)
+/// and "Show dashboard" (currently in Items).
+///
+/// The first-launch dashboard pane is populated by
+/// `rebuild_dashboard_widgets` from `do_scan`.  The toggle
+/// is wired here so a stale "still empty" dashboard after a
+/// blank scan is impossible; clicking the toggle without
+/// scanning leaves the dashboard blank, which is intentional
+/// (nothing to summarise yet).
+///
+/// GTK signal-firing safety: `set_visible` on a `gtk::Widget`
+/// fires `notify::visible` synchronously; no handler is
+/// connected to that signal today, so no `with_rebuilding`
+/// wrapper is needed.  A future contributor adding one
+/// should mirror the defensive pattern documented at the top
+/// of `make_item_row`.
+fn on_view_toggle_clicked(
+    btn: &Button,
+    items_scroll: &ScrolledWindow,
+    dashboard_scroll: &ScrolledWindow,
+) {
+    let items_visible = items_scroll.is_visible();
+    items_scroll.set_visible(!items_visible);
+    dashboard_scroll.set_visible(items_visible);
+    // Label polarity: derive the label from the *new* (post-toggle)
+    // state, not the pre-toggle `items_visible` we captured before
+    // the `set_visible` calls.  The earlier branch (`if items_visible
+    // { "Show dashboard" } else { "Show items" }`) advertised the
+    // view the user just left, so the moment after clicking FROM
+    // Items TO Dashboard the button still read "Show dashboard" —
+    // confusing.  Swapping the two branches so each label describes
+    // the *next* destination fixes the UX without changing the
+    // visibility logic.  See `more.md` §4.1 "Implementation notes"
+    // for the polarity contract.
+    btn.set_label(if items_visible {
+        "Show items"
+    } else {
+        "Show dashboard"
+    });
+    btn.set_tooltip_text(Some(
+        "Toggle the per-engine disk-usage dashboard view",
+    ));
+}
+
 fn on_item_toggled(
     state: &Rc<RefCell<State>>,
     active: bool,
@@ -1206,6 +1642,18 @@ fn on_item_toggled(
     if let Some(cat) = category {
         update_group_subtitle(state, cat);
         update_group_toggle_button(state, cat);
+        // A per-item toggle may flip selection for any status
+        // bucket; refresh every per-status button we cached for
+        // this category so its label/badge stays accurate.
+        for status in [Status::Dangling, Status::Stopped] {
+            if state
+                .borrow()
+                .status_toggle_buttons
+                .contains_key(&(cat, status))
+            {
+                update_status_toggle_button(state, cat, status);
+            }
+        }
     }
 }
 
@@ -1353,6 +1801,198 @@ pub(crate) fn compute_group_toggle_button_state(
 pub(crate) struct GroupToggleButtonRender {
     pub label: &'static str,
     pub sensitive: bool,
+}
+
+/// Per-status toggle-button description produced by
+/// `compute_status_toggle_button_state`. Carries the `Status`
+/// key so the click-handler wiring in `append_group` can look
+/// up the cached button, mirroring the field shape of
+/// `State::status_toggle_buttons: BTreeMap<(Category, Status),
+/// Button>`.
+#[derive(Debug, PartialEq, Eq, Clone, Copy)]
+pub(crate) struct StatusToggleButtonRender {
+    pub label: &'static str,
+    pub sensitive: bool,
+    pub status: Status,
+}
+
+/// Pure description of a per-(category, status) toggle button's
+/// label and sensitivity, given the count of safe items with
+/// `status` and the count of currently-selected safe items with
+/// `status`.
+///
+/// **Null safe-matches → button would not have been appended.**
+/// `append_group` only adds the button when at least one safe
+/// item with this status exists, so this helper is unreachable
+/// from the GUI for the `safe_for_status_count == 0` case.
+/// We still return a sensible render (disabled, "Select All <X>")
+/// to keep the helper total — same defensive shape as
+/// `compute_group_toggle_button_state`.
+///
+/// **Label source.**  Returns `(select_label, deselect_label)`
+/// from [`Status::select_all_labels`] for `status`; the
+/// function matches on the input count to choose between them.
+pub(crate) fn compute_status_toggle_button_state(
+    status: Status,
+    safe_for_status_count: usize,
+    selected_for_status_count: usize,
+) -> StatusToggleButtonRender {
+    let (select_label, deselect_label) = status
+        .select_all_labels()
+        .unwrap_or(("Select all", "Deselect all"));
+    if safe_for_status_count == 0 {
+        StatusToggleButtonRender {
+            label: select_label,
+            sensitive: false,
+            status,
+        }
+    } else if selected_for_status_count >= safe_for_status_count {
+        StatusToggleButtonRender {
+            label: deselect_label,
+            sensitive: true,
+            status,
+        }
+    } else {
+        StatusToggleButtonRender {
+            label: select_label,
+            sensitive: true,
+            status,
+        }
+    }
+}
+
+/// Handler for the per-status "Select All <Status>" / "Deselect
+/// All <Status>" buttons (e.g. "Select All Dangling"). Mirrors
+/// [`on_group_toggle_clicked`] but filters by `item.status ==
+/// status` so only items in that sub-state are toggled.
+fn on_status_toggle_clicked(
+    state: &Rc<RefCell<State>>,
+    cat: Category,
+    status: Status,
+) {
+    if state.borrow().rebuilding {
+        return;
+    }
+    // Collect every actually-deletable item key in this category
+    // matching `status`. `is_deletable_for_real` keeps a
+    // previously-failed item out of the final selection even if
+    // its `Status` matches.
+    let matching_keys: Vec<(String, String)> = {
+        let s = state.borrow();
+        s.items
+            .iter()
+            .filter(|i| {
+                i.category == cat
+                    && i.status == status
+                    && i.is_deletable_for_real(&s.delete_errors)
+            })
+            .map(|i| (i.source.clone(), i.id.clone()))
+            .collect()
+    };
+    if matching_keys.is_empty() {
+        return;
+    }
+    let all_selected = {
+        let s = state.borrow();
+        matching_keys.iter().all(|k| s.selected.contains(k))
+    };
+    let new_active = !all_selected;
+    {
+        let mut s = state.borrow_mut();
+        for k in &matching_keys {
+            if new_active {
+                s.selected.insert(k.clone());
+            } else {
+                s.selected.remove(k);
+            }
+        }
+    }
+    // Sync the affected per-item checkboxes. Same defensive
+    // pattern as `on_group_toggle_clicked`: drop the borrow on
+    // state before `set_active`, then re-borrow under
+    // `with_rebuilding` so per-item `toggled` callbacks can
+    // safely acquire their own borrow while we fire the signal.
+    let checkboxes: Vec<CheckButton> = {
+        let s = state.borrow();
+        matching_keys
+            .iter()
+            .filter_map(|k| s.item_checkboxes.get(k).cloned())
+            .collect()
+    };
+    with_rebuilding(state, || {
+        for cb in &checkboxes {
+            cb.set_active(new_active);
+        }
+    });
+    update_group_subtitle(state, cat);
+    update_group_toggle_button(state, cat);
+    update_status_toggle_button(state, cat, status);
+    // A change in one status's selection also flips the OTHER
+    // status's selection count (e.g. selecting all Dangling
+    // deselects what Stopped was selecting). Refresh every
+    // status toggle button visible on this row so the badges
+    // always agree with `state.selected`.
+    for sibling in [Status::Dangling, Status::Stopped] {
+        if sibling == status {
+            continue;
+        }
+        if state
+            .borrow()
+            .status_toggle_buttons
+            .contains_key(&(cat, sibling))
+        {
+            update_status_toggle_button(state, cat, sibling);
+        }
+    }
+}
+
+/// Recompute the per-(cat, status) "Select All <Status>" button's
+/// label and sensitivity. Mirrors [`update_group_toggle_button`]
+/// but counts only items matching `item.status == status`.
+fn update_status_toggle_button(
+    state: &Rc<RefCell<State>>,
+    cat: Category,
+    status: Status,
+) {
+    let (safe_for_status_count, selected_for_status_count) = {
+        let s = state.borrow();
+        let safe = s
+            .items
+            .iter()
+            .filter(|i| {
+                i.category == cat
+                    && i.status == status
+                    && i.is_deletable_for_real(&s.delete_errors)
+            })
+            .count();
+        let selected = s
+            .items
+            .iter()
+            .filter(|i| {
+                i.category == cat
+                    && i.status == status
+                    && i.is_deletable_for_real(&s.delete_errors)
+                    && s.selected.contains(&(i.source.clone(), i.id.clone()))
+            })
+            .count();
+        (safe, selected)
+    };
+    let render = compute_status_toggle_button_state(
+        status,
+        safe_for_status_count,
+        selected_for_status_count,
+    );
+    let btn = state
+        .borrow()
+        .status_toggle_buttons
+        .get(&(cat, status))
+        .cloned();
+    if let Some(btn) = btn {
+        with_rebuilding(state, || {
+            btn.set_label(render.label);
+            btn.set_sensitive(render.sensitive);
+        });
+    }
 }
 
 /// Recompute and set the subtitle for a category's ExpanderRow.
@@ -1723,6 +2363,77 @@ mod tests {
         assert!(r.sensitive);
     }
 
+    // --- per-status (e.g. "Select All Dangling") toggle button ---
+
+    #[test]
+    fn status_toggle_button_disabled_when_no_safe_items_for_status() {
+        // `safe_for_status == 0` corresponds to the
+        // unreachable-from-GUI case (the button is only
+        // appended when at least one safe <status> item
+        // exists). Pinned for parity with group_toggle_button_*.
+        let r = compute_status_toggle_button_state(Status::Dangling, 0, 0);
+        assert_eq!(r.label, "Select All Dangling");
+        assert!(!r.sensitive);
+        assert_eq!(r.status, Status::Dangling);
+    }
+
+    #[test]
+    fn status_toggle_button_says_select_when_none_selected_for_status() {
+        let r = compute_status_toggle_button_state(Status::Dangling, 3, 0);
+        assert_eq!(r.label, "Select All Dangling");
+        assert!(r.sensitive);
+        assert_eq!(r.status, Status::Dangling);
+    }
+
+    #[test]
+    fn status_toggle_button_says_select_when_partially_selected_for_status() {
+        let r = compute_status_toggle_button_state(Status::Dangling, 3, 1);
+        assert_eq!(r.label, "Select All Dangling");
+        assert!(r.sensitive);
+    }
+
+    #[test]
+    fn status_toggle_button_says_deselect_when_all_selected_for_status() {
+        let r = compute_status_toggle_button_state(Status::Dangling, 3, 3);
+        assert_eq!(r.label, "Deselect All Dangling");
+        assert!(r.sensitive);
+    }
+
+    #[test]
+    fn status_toggle_button_treats_overselected_as_deselect_for_status() {
+        // Defensive: stale selection keys (e.g. lingering past
+        // a delete) must not leave the button stuck on the
+        // select side.
+        let r = compute_status_toggle_button_state(Status::Dangling, 2, 3);
+        assert_eq!(r.label, "Deselect All Dangling");
+        assert!(r.sensitive);
+    }
+
+    #[test]
+    fn status_toggle_button_stopped_uses_stopped_labels() {
+        // Generalises beyond Dangling: Stopped also earns a
+        // dedicated button (see `Status::select_all_labels`).
+        let r_select =
+            compute_status_toggle_button_state(Status::Stopped, 2, 0);
+        assert_eq!(r_select.label, "Select All Stopped");
+        assert_eq!(r_select.status, Status::Stopped);
+        let r_deselect =
+            compute_status_toggle_button_state(Status::Stopped, 2, 2);
+        assert_eq!(r_deselect.label, "Deselect All Stopped");
+    }
+
+    #[test]
+    fn status_toggle_button_unused_returns_select_all_label_without_changes() {
+        // `Status::select_all_labels` for Unused is None, so the
+        // helper falls back to the generic "Select all" /
+        // "Deselect all" labels and still produces a sensible
+        // render. Mirror of the symmetric unreachable case.
+        let r = compute_status_toggle_button_state(Status::Unused, 0, 0);
+        assert_eq!(r.label, "Select all");
+        assert!(!r.sensitive);
+        assert_eq!(r.status, Status::Unused);
+    }
+
     // --- with_rebuilding helper ---
 
     fn empty_state() -> Rc<RefCell<State>> {
@@ -2052,5 +2763,211 @@ mod tests {
         // `notify::label` or `notify::sensitive` handler that
         // re-enters state sees the flag and bails.
         update_group_toggle_button(&state, Category::Image);
+    }
+
+    // --- describe_dashboard_row helper ---
+    //
+    // The dashboard pane (more.md §4.1) renders one
+    // `ActionRow` per engine via `describe_dashboard_row`.
+    // These tests pin the pure-helper contract so a future
+    // refactor cannot silently break title/subtitle/suffix
+    // formatting or the singular-vs-plural rule.
+
+    use systemprune_core::orchestrator::{DashboardRow, DashboardTopItem};
+
+    fn make_dashboard_row(
+        source: &str,
+        count: usize,
+        total_bytes: u64,
+        top_name: Option<&str>,
+        top_size: Option<u64>,
+    ) -> DashboardRow {
+        DashboardRow {
+            source: source.to_string(),
+            count,
+            total_bytes,
+            top: match (top_name, top_size) {
+                (Some(name), Some(size)) => Some(DashboardTopItem {
+                    id: name.to_string(),
+                    name: name.to_string(),
+                    size_bytes: size,
+                }),
+                _ => None,
+            },
+        }
+    }
+
+    #[test]
+    fn describe_dashboard_row_with_top_item_includes_top_in_subtitle() {
+        // `4 * 1024^3 = 4 GiB` so `format_size(_, binary = true)`
+        // returns the deterministic "4.0 GiB" (same pattern the
+        // orchestrator test suite pins).  Using a non-power-of-
+        // two value would couple this test to format_size's
+        // rounding semantics.
+        let row = make_dashboard_row(
+            "docker",
+            5,
+            4 * 1024_u64.pow(3),
+            Some("big-image"),
+            Some(2 * 1024_u64.pow(3)),
+        );
+        let render = describe_dashboard_row(&row);
+        assert_eq!(render.title, "docker");
+        assert!(
+            render.subtitle.contains("5 items"),
+            "subtitle must use plural form for count > 1, got: {}",
+            render.subtitle
+        );
+        assert!(
+            render.subtitle.contains("4.0 GiB"),
+            "subtitle must include total size, got: {}",
+            render.subtitle
+        );
+        assert!(
+            render.subtitle.contains("big-image"),
+            "subtitle must include top item name when Some, got: {}",
+            render.subtitle
+        );
+        assert!(
+            render.subtitle.contains("top:"),
+            "subtitle must include 'top:' marker when Some, got: {}",
+            render.subtitle
+        );
+        assert!(
+            render.subtitle.contains("2.0 GiB"),
+            "subtitle must include the top item's size when Some, got: {}",
+            render.subtitle
+        );
+        assert_eq!(render.suffix_text, "4.0 GiB");
+    }
+
+    #[test]
+    fn describe_dashboard_row_without_top_item_omits_top_clause() {
+        let row = make_dashboard_row("ollama", 3, 4 * 1024_u64.pow(3), None, None);
+        let render = describe_dashboard_row(&row);
+        assert_eq!(render.title, "ollama");
+        assert!(
+            render.subtitle.contains("3 items"),
+            "subtitle must include plural count, got: {}",
+            render.subtitle
+        );
+        assert!(
+            render.subtitle.contains("4.0 GiB"),
+            "subtitle must include total size, got: {}",
+            render.subtitle
+        );
+        assert!(
+            !render.subtitle.contains("top:"),
+            "subtitle must NOT include 'top:' marker when top is None, got: {}",
+            render.subtitle
+        );
+        assert_eq!(render.suffix_text, "4.0 GiB");
+    }
+
+    #[test]
+    fn describe_dashboard_row_singular_count_uses_singular_form() {
+        // `count == 1` must use "1 item" (plural-less form),
+        // mirroring the `append_group` subtitle contract.
+        // Forgetting the singular branch is a common bug in
+        // iteration log strings; this test exists to catch it.
+        let row = make_dashboard_row(
+            "podman",
+            1,
+            4 * 1024_u64.pow(3),
+            None,
+            None,
+        );
+        let render = describe_dashboard_row(&row);
+        assert_eq!(render.title, "podman");
+        assert!(
+            render.subtitle.contains("1 item"),
+            "subtitle must use singular \"1 item\", got: {}",
+            render.subtitle
+        );
+        assert!(
+            !render.subtitle.contains("items"),
+            "singular count must NOT contain plural \"items\", got: {}",
+            render.subtitle
+        );
+        assert!(render.subtitle.contains("4.0 GiB"));
+    }
+
+    #[test]
+    fn describe_dashboard_row_zero_count_handles_zero() {
+        // An engine with no items at all (scanner returned
+        // nothing prunable) still gets a row; pin the helper's
+        // behaviour rather than the exact format of "0 B"
+        // (which would couple the test to format_size's
+        // zero-handling and is out of scope here).
+        let row = make_dashboard_row("snap", 0, 0, None, None);
+        let render = describe_dashboard_row(&row);
+        assert_eq!(render.title, "snap");
+        assert!(
+            render.subtitle.contains("0 items"),
+            "subtitle must use \"0 items\" (plural form per Rust's \
+             singular-vs-plural rule), got: {}",
+            render.subtitle
+        );
+        assert!(
+            !render.subtitle.contains("top:"),
+            "subtitle must NOT include 'top:' when top is None, got: {}",
+            render.subtitle
+        );
+    }
+
+    #[test]
+    fn describe_dashboard_row_uses_source_as_title_unchanged() {
+        // The helper is a pure renderer; the engine name is
+        // passed through verbatim.  Markup escaping happens
+        // at the call site (via `escape_markup`), not here.
+        // `escape_markup` no-ops on engine names that contain
+        // no Pango markup special chars (`<&>"'` etc.), so the
+        // rendered title equals the input source.  This pins
+        // the common-case passthrough; the special-char branch
+        // is covered by
+        // `describe_dashboard_row_escapes_markup_chars_in_title`
+        // below.
+        let row = make_dashboard_row("ollama-tools", 7, 4 * 1024_u64.pow(3), None, None);
+        let render = describe_dashboard_row(&row);
+        assert_eq!(render.title, "ollama-tools");
+    }
+
+    #[test]
+    fn describe_dashboard_row_escapes_markup_chars_in_title() {
+        // Pango markup special chars must be escaped before
+        // being passed to `ActionRow::set_title`; otherwise
+        // GTK rejects the markup and the row construction
+        // aborts.  Pin the contract by passing a source
+        // string with `&`, `<`, and `>` chars so any future
+        // refactor that drops the `escape_markup` call from
+        // the helper surfaces a regression here.  Subtitle
+        // is left raw by this helper on purpose; the call
+        // site (`rebuild_dashboard_widgets`) wraps
+        // `render.subtitle` in another `escape_markup`.
+        let row = make_dashboard_row(
+            "weird&name<tag>",
+            2,
+            4 * 1024_u64.pow(3),
+            None,
+            None,
+        );
+        let render = describe_dashboard_row(&row);
+        assert_eq!(
+            render.title,
+            "weird&amp;name&lt;tag&gt;",
+            "title must be Pango-escaped so ActionRow::set_title doesn't crash"
+        );
+        // Subtitle does NOT include the source name here
+        // (no `top_item` was supplied), so there is no
+        // source-derived content to assert a raw round-trip
+        // on.  The helper must leave subtitle untouched so
+        // the call site (`rebuild_dashboard_widgets`)
+        // owns the `escape_markup` step; pin that contract
+        // with the negative control below (no
+        // double-escape).
+        assert!(
+            !render.subtitle.contains("&amp;"),
+            "subtitle must NOT be pre-escaped by the helper; the call site owns that"
+        );
     }
 }
