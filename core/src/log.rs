@@ -71,22 +71,32 @@ impl LogEntry {
     /// format is not part of the public contract -- it is
     /// for human display only and may change.
     pub fn format_line(&self) -> String {
-        let ts = match self.timestamp.duration_since(SystemTime::UNIX_EPOCH) {
-            Ok(d) => {
-                // Render as ``YYYY-MM-DDTHH:MM:SSZ`` using
-                // a simple UTC breakdown.  We deliberately
-                // avoid pulling in `chrono` / `time` --
-                // this is a debug log, not a timestamp API.
-                let secs = d.as_secs();
-                let (year, month, day, hour, min, sec) = epoch_to_utc(secs);
-                format!(
-                    "{:04}-{:02}-{:02}T{:02}:{:02}:{:02}Z",
-                    year, month, day, hour, min, sec
-                )
-            }
-            Err(_) => "<unknown time>".to_string(),
-        };
+        let ts = system_time_to_rfc3339(self.timestamp);
         format!("[{}] [{}] {}", ts, self.level.tag(), self.message)
+    }
+}
+
+/// Render a [`SystemTime`] as a UTC RFC 3339 / ISO 8601 string
+/// of the form ``"YYYY-MM-DDTHH:MM:SSZ"``.  Times before
+/// `UNIX_EPOCH` (which shouldn't happen in practice) are
+/// rendered as ``"<unknown time>"`` so the formatter never panics.
+///
+/// Exposed publicly so other modules (notably
+/// [`crate::history`]) can render timestamps in the same
+/// shape without duplicating the algorithm.  Uses the
+/// civil-from-days algorithm from Howard Hinnant's
+/// ``<chrono>/`` proposal -- no `chrono` / `time` deps.
+pub fn system_time_to_rfc3339(t: SystemTime) -> String {
+    match t.duration_since(SystemTime::UNIX_EPOCH) {
+        Ok(d) => {
+            let secs = d.as_secs();
+            let (year, month, day, hour, min, sec) = epoch_to_utc(secs);
+            format!(
+                "{:04}-{:02}-{:02}T{:02}:{:02}:{:02}Z",
+                year, month, day, hour, min, sec
+            )
+        }
+        Err(_) => "<unknown time>".to_string(),
     }
 }
 
@@ -210,8 +220,8 @@ fn epoch_to_utc(secs: u64) -> (i32, u32, u32, u32, u32, u32) {
     let y = (yoe as i64) + era * 400;
     let doy = doe - (365 * yoe + yoe / 4 - yoe / 100); // [0, 365]
     let mp = (5 * doy + 2) / 153; // [0, 11]
-    let d = (doy - (153 * mp + 2) / 5 + 1) as u32; // [1, 31]
-    let m = if mp < 10 { mp + 3 } else { mp - 9 } as u32; // [1, 12]
+    let d = doy - (153 * mp + 2) / 5 + 1; // [1, 31]
+    let m = if mp < 10 { mp + 3 } else { mp - 9 }; // [1, 12]
     let y = if m <= 2 { y + 1 } else { y };
     (y as i32, m, d, hour, min, sec)
 }
@@ -362,5 +372,24 @@ mod tests {
         assert_eq!(epoch_to_utc(946_684_800), (2000, 1, 1, 0, 0, 0));
         // 2024-01-15T10:30:45Z = 1705314645
         assert_eq!(epoch_to_utc(1_705_314_645), (2024, 1, 15, 10, 30, 45));
+    }
+
+    #[test]
+    fn system_time_to_rfc3339_matches_log_entry_format() {
+        // The two helpers (private format_line, public
+        // system_time_to_rfc3339) must agree so external
+        // callers see the same wire format as the in-memory
+        // log lines.
+        let t = SystemTime::UNIX_EPOCH + std::time::Duration::from_secs(0);
+        assert_eq!(system_time_to_rfc3339(t), "1970-01-01T00:00:00Z");
+    }
+
+    #[test]
+    fn system_time_to_rfc3339_falls_back_for_pre_epoch() {
+        // A pre-UNIX_EPOCH time (e.g. system clock anomaly)
+        // must not panic.  The formatter returns the
+        // documented "<unknown time>" sentinel.
+        let t = SystemTime::UNIX_EPOCH - std::time::Duration::from_secs(1);
+        assert_eq!(system_time_to_rfc3339(t), "<unknown time>");
     }
 }
