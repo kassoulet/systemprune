@@ -1,0 +1,135 @@
+# Pre-commit hooks for systemprune-rs.
+#
+# Drop-in compatible with both:
+#   * `pre-commit` (Python) — https://pre-commit.com/
+#   * `prek`        (Rust)  — https://github.com/prek-org/prek
+# Both tools consume this exact config format; a developer can use
+# either binary and the hooks will fire identically.
+#
+# Mirrors the existing `.github/workflows/ci.yml` surface for the
+# CHECKS that are cheap enough to run at commit time:
+#   * `fmt`    job — `cargo fmt -- --check`
+#   * `clippy` job — `cargo clippy --workspace --all-targets
+#                      --locked -- -D warnings`
+# The expensive CI jobs (`msrv`, `build-test`, `gui-xvfb`) stay in
+# CI; running them in pre-commit would make commit latency
+# unacceptable.
+#
+# Cargo hooks use `language: system` rather than `language: rust`
+# because the latter creates an isolated pre-commit-managed rust
+# environment that re-downloads toolchains on every hook change.
+# With `language: system`, hooks honor the developer's local
+# rustup (MSRV 1.75) and re-use the cached toolchain — much
+# faster across a session of commits.
+#
+# Hook install: `pre-commit install` (or `prek install`) wires
+# this config into `.git/hooks/pre-commit`. After install, every
+# `git commit` runs the hooks against staged files; pass
+# `--no-verify` to bypass in a hurry.
+#
+# Footgun — `cargo clippy --workspace --all-targets` compiles the
+# `gui` crate, which links GTK4 + libadwaita via pkg-config.  A
+# developer without `libgtk-4-dev` + `libadwaita-1-dev` installed
+# locally will see the hook fail at the gtk4-sys probe — same
+# gate the `build-test` job in CI hits.  The fix is the same
+# apt-install set documented in ci.yml; if GTK is unworkable
+# for a local environment, run `SKIP=cargo-clippy git commit` to
+# bypass that single hook without losing the hygiene checks.
+#
+# Pre-install prerequisites — the cargo-clippy hook IS a true
+# gate (`-D warnings` ⇒ warnings-as-errors), so any pre-existing
+# lint debt becomes a hard blocker on the very first commit
+# after install.  Before installing:
+#   1. Clean pre-existing clippy debt — once, on the branch to
+#      be installed against:
+#         cargo clippy --workspace --all-targets --locked \
+#           --fix --allow-dirty -- -D warnings
+#      `--fix` only auto-applies clippy-typed lint
+#      suggestions.  Any rustc-level `deny(warnings)`-
+#      classified leftover (unused imports, dead code, …) is
+#      NOT touched by `--fix` — those trip the compiler itself
+#      before clippy's auto-fixer runs.  Re-run the same
+#      command after applying the clippy fixes, then patch the
+#      remaining handful by hand before installing, so the
+#      hook is a true gate on a clean baseline.
+#   2. Familiarize yourself with the `--locked` interaction:
+#      `cargo clippy --locked` fails BEFORE clippy even runs
+#      with `error: the lock file ... needs to be updated`
+#      whenever `Cargo.lock` is dirty — e.g. immediately after
+#      a `cargo add` whose lockfile change you haven't yet
+#      committed.  Two options: (a) commit `Cargo.lock`
+#      alongside the dep change, or (b) `SKIP=cargo-clippy` for
+#      the one interim commit.  This is the same behavior CI
+#      enforces via `--locked` on the `clippy` job; the hook
+#      isn't stricter than CI, it just exposes the restriction
+#      locally.
+#
+# `cargo fmt --all` is a strictly stronger check than CI's
+# `cargo fmt -- --check` (no `--all`).  Not a regression — just
+# a delta worth knowing: the hook will catch fmt drift on
+# untouched crates that CI silently lets through.
+
+default_install_hook_types: [pre-commit]
+default_stages: [commit]
+fail_fast: false
+
+repos:
+  # Standard hygiene hooks.  Cheap (no Rust toolchain) and catch
+  # the "obvious" mistakes — accidental `<<<<<<<` markers,
+  # trailing whitespace, oversized binary blobs, malformed YAML.
+  - repo: https://github.com/pre-commit/pre-commit-hooks
+    rev: v4.6.0
+    hooks:
+      - id: trailing-whitespace
+      - id: end-of-file-fixer
+      - id: check-yaml
+        # YAML files we don't want to lint:
+        #   * Cargo.lock is generated; lints on it produce false
+        #     positives (Cargo occasionally emits long lines).
+        #   * `.github/codeql/queries/**` houses CodeQL YML +
+        #     CodeQL-packs — the YAML there is codeql-pack.yml
+        #     which uses a different schema than pre-commit's
+        #     check-yaml expects.
+        exclude: |
+          (?x)^(
+              Cargo\.lock
+            | \.github/codeql/queries/.*
+          )$      - id: check-added-large-files
+        # The repo is small but lockfiles grow with the dep
+        # graph.  Cap individual file at 1000 KB so a spurious
+        # binary accidentally `git add`'d requires an explicit
+        # override (`git commit --no-verify`); legitimate
+        # `Cargo.lock` growth on a 10–20 crate workspace still
+        # passes without false positives.
+        args: ["--maxkb=1000"]      
+      - id: check-merge-conflict
+      - id: mixed-line-ending
+        # Normalize to LF only (no CRLF).  The repo's CI runs on
+        # Linux, contributors are assumed to be on Unix-likes,
+        # and GTK source files break on CRLF.
+        args: ["--fix=lf"]
+
+  # Local cargo hooks.  `repo: local` + `language: system` means
+  # pre-commit shells out to whatever `cargo` is on PATH,
+  # honoring the MSRV 1.75 toolchain pinned by the rust-toolchain
+  # file / CI workflow.
+  - repo: local
+    hooks:
+      - id: cargo-fmt
+        name: cargo fmt --check
+        entry: cargo fmt --all -- --check
+        language: system
+        types: [rust]
+        pass_filenames: false
+
+      - id: cargo-clippy
+        # Mirrors `.github/workflows/ci.yml`'s `clippy` job.
+        # `-D warnings` is intentional — promote lint warnings
+        # to errors so the hook gates the commit rather than
+        # just whinging.  Pre-existing warnings will block
+        # commits until fixed; this is by design.
+        name: cargo clippy (D warnings)
+        entry: cargo clippy --workspace --all-targets --locked -- -D warnings
+        language: system
+        types: [rust]
+        pass_filenames: false
