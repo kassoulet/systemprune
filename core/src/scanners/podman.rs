@@ -99,10 +99,11 @@ impl Scanner for PodmanScanner {
 
     async fn delete_item(&self, item: &PrunableItem) -> Result<(), EngineError> {
         let argv: Vec<&str> = match item.category {
-            Category::Image => vec!["podman", "rmi", "-f", &item.id],
-            Category::Container => vec!["podman", "rm", "-f", &item.id],
-            Category::Volume => vec!["podman", "volume", "rm", &item.id],
-            Category::Network => vec!["podman", "network", "rm", &item.id],
+            // Security: Use `--` to prevent the ID from being interpreted as a flag.
+            Category::Image => vec!["podman", "rmi", "-f", "--", &item.id],
+            Category::Container => vec!["podman", "rm", "-f", "--", &item.id],
+            Category::Volume => vec!["podman", "volume", "rm", "--", &item.id],
+            Category::Network => vec!["podman", "network", "rm", "--", &item.id],
             other => {
                 return Err(EngineError::new(
                     format!("unsupported podman category: {:?}", other),

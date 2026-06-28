@@ -54,7 +54,8 @@ impl Scanner for FlatpakScanner {
     async fn delete_item(&self, item: &PrunableItem) -> Result<(), EngineError> {
         self.base
             .run(
-                &["flatpak", "uninstall", "--delete-data", "-y", &item.id],
+                // Security: Use `--` to prevent the ID from being interpreted as a flag.
+                &["flatpak", "uninstall", "--delete-data", "-y", "--", &item.id],
                 TIMEOUT_SECS,
             )
             .await

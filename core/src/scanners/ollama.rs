@@ -92,7 +92,8 @@ impl Scanner for OllamaScanner {
 
     async fn delete_item(&self, item: &PrunableItem) -> Result<(), EngineError> {
         self.base
-            .run(&["ollama", "rm", &item.id], TIMEOUT_SECS)
+            // Security: Use `--` to prevent the ID from being interpreted as a flag.
+            .run(&["ollama", "rm", "--", &item.id], TIMEOUT_SECS)
             .await
             .map(|_| ())
     }
