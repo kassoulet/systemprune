@@ -101,7 +101,7 @@ repos:
         # override (`git commit --no-verify`); legitimate
         # `Cargo.lock` growth on a 10–20 crate workspace still
         # passes without false positives.
-        args: ["--maxkb=1000"]      
+        args: ["--maxkb=1000"]
       - id: check-merge-conflict
       - id: mixed-line-ending
         # Normalize to LF only (no CRLF).  The repo's CI runs on

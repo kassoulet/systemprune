@@ -196,4 +196,3 @@ jobs:
           # server so the X11 backend is the correct match.
           GDK_BACKEND: x11
         run: xvfb-run -a cargo test -p systemprune-gui --locked --no-fail-fast -- --ignored --nocapture --test-threads=1
-
