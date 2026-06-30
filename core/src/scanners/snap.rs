@@ -120,7 +120,11 @@ impl SnapScanner {
                 source: self.source().to_string(),
                 category: Category::SnapRevision,
                 size_bytes: parse_size(&size_str),
-                status: if is_active { Status::Active } else { Status::Unused },
+                status: if is_active {
+                    Status::Active
+                } else {
+                    Status::Unused
+                },
                 extra,
             });
         }
@@ -151,11 +155,7 @@ impl SnapScanner {
             }
             // Service names look like ``snap.<snap-name>.<service>`` —
             // take the second component (first is always ``"snap"``).
-            let snap_name = parts[0]
-                .split('.')
-                .nth(1)
-                .unwrap_or("")
-                .to_string();
+            let snap_name = parts[0].split('.').nth(1).unwrap_or("").to_string();
             if !snap_name.is_empty() {
                 set.insert(snap_name);
             }

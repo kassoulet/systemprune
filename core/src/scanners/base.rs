@@ -78,7 +78,12 @@ impl BaseScanner {
             Ok(r) => r,
             Err(_) => {
                 return Err(EngineError::new(
-                    format!("{} timed out after {}s: {}", self.binary, timeout_secs, format_command(&owned)),
+                    format!(
+                        "{} timed out after {}s: {}",
+                        self.binary,
+                        timeout_secs,
+                        format_command(&owned)
+                    ),
                     self.source,
                     owned,
                     None,

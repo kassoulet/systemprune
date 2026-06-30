@@ -94,7 +94,8 @@ repos:
           (?x)^(
               Cargo\.lock
             | \.github/codeql/queries/.*
-          )$      - id: check-added-large-files
+          )$
+      - id: check-added-large-files
         # The repo is small but lockfiles grow with the dep
         # graph.  Cap individual file at 1000 KB so a spurious
         # binary accidentally `git add`'d requires an explicit

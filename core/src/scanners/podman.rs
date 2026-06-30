@@ -12,6 +12,50 @@ use tracing::warn;
 
 const TIMEOUT_SECS: u64 = 60;
 
+/// Podman reports the ``Size`` field in two incompatible shapes:
+///
+/// * Older Podman (and the format ``--format {{json .}}`` produces)
+///   emits a human-readable string like ``"245 MB"``.
+/// * Podman 4.x+ with ``--format json`` emits a raw byte count as
+///   an integer (e.g. ``2455747898``).
+///
+/// Deserialising the integer directly into a ``String`` raises
+/// ``invalid type: integer ..., expected a string`` and aborts the
+/// whole podman scan, so we accept either shape via an untagged
+/// enum. ``Bytes`` is listed first so serde-json prefers the
+/// lossless integer form; the string variant is the fallback for
+/// the legacy "245 MB" format.
+#[derive(Debug, Clone, Deserialize)]
+#[serde(untagged)]
+enum SizeField {
+    Bytes(u64),
+    Human(String),
+}
+
+/// Default to an empty string so missing ``Size`` fields use the
+/// existing ``parse_size("") -> 0`` fallback path rather than
+/// rejecting the entry. We can't ``derive(Default)`` on the enum
+/// because the ``Human`` variant carries data (and ``#[default]``
+/// only works on unit variants); a manual impl keeps the call sites
+/// consistent with ``#[serde(default)]`` on the field.
+impl Default for SizeField {
+    fn default() -> Self {
+        SizeField::Human(String::new())
+    }
+}
+
+impl SizeField {
+    /// Convert the field into a byte count. Integer values pass
+    /// through unchanged; strings are run through ``parse_size``
+    /// which understands units like ``"MB"`` and ``"GiB"``.
+    fn as_bytes(&self) -> u64 {
+        match self {
+            SizeField::Bytes(b) => *b,
+            SizeField::Human(s) => parse_size(s),
+        }
+    }
+}
+
 #[derive(Debug, Deserialize)]
 struct PodmanImage {
     #[serde(alias = "Id", alias = "ID")]
@@ -23,7 +67,7 @@ struct PodmanImage {
     #[serde(default, alias = "Tag")]
     tag: String,
     #[serde(default, alias = "Size")]
-    size: String,
+    size: SizeField,
 }
 
 #[derive(Debug, Deserialize)]
@@ -37,7 +81,7 @@ struct PodmanContainer {
     #[serde(default, alias = "Image")]
     image: String,
     #[serde(default, alias = "Size")]
-    size: String,
+    size: SizeField,
 }
 
 #[derive(Debug, Deserialize)]
@@ -127,7 +171,10 @@ impl PodmanScanner {
             active.iter().map(|id| short_image_id(id)).collect();
         let (out, _) = self
             .base
-            .run(&["podman", "images", "-a", "--format", "json"], TIMEOUT_SECS)
+            .run(
+                &["podman", "images", "-a", "--format", "json"],
+                TIMEOUT_SECS,
+            )
             .await?;
         let data = parse_json_maybe_array(&out);
         let mut items: Vec<PrunableItem> = Vec::new();
@@ -145,7 +192,10 @@ impl PodmanScanner {
                 continue;
             }
             let repo = if img.repository.is_empty() {
-                img.names.first().cloned().unwrap_or_else(|| "<none>".into())
+                img.names
+                    .first()
+                    .cloned()
+                    .unwrap_or_else(|| "<none>".into())
             } else {
                 img.repository.clone()
             };
@@ -177,7 +227,7 @@ impl PodmanScanner {
                 engine: Engine::Podman,
                 source: self.source().to_string(),
                 category: Category::Image,
-                size_bytes: parse_size(&img.size),
+                size_bytes: img.size.as_bytes(),
                 status,
                 extra,
             });
@@ -223,7 +273,7 @@ impl PodmanScanner {
                 engine: Engine::Podman,
                 source: self.source().to_string(),
                 category: Category::Container,
-                size_bytes: parse_size(&c.size),
+                size_bytes: c.size.as_bytes(),
                 status: Status::Stopped,
                 extra,
             });
@@ -234,7 +284,10 @@ impl PodmanScanner {
     async fn list_volumes(&self) -> Result<Vec<PrunableItem>, EngineError> {
         let (out, _) = self
             .base
-            .run(&["podman", "volume", "ls", "--format", "json"], TIMEOUT_SECS)
+            .run(
+                &["podman", "volume", "ls", "--format", "json"],
+                TIMEOUT_SECS,
+            )
             .await?;
         let data = parse_json_maybe_array(&out);
         let mut items: Vec<PrunableItem> = Vec::new();
@@ -270,7 +323,10 @@ impl PodmanScanner {
     async fn list_networks(&self) -> Result<Vec<PrunableItem>, EngineError> {
         let (out, _) = self
             .base
-            .run(&["podman", "network", "ls", "--format", "json"], TIMEOUT_SECS)
+            .run(
+                &["podman", "network", "ls", "--format", "json"],
+                TIMEOUT_SECS,
+            )
             .await?;
         let data = parse_json_maybe_array(&out);
         let mut items: Vec<PrunableItem> = Vec::new();
@@ -392,10 +448,7 @@ fn parse_json_maybe_array(out: &str) -> Vec<serde_json::Value> {
                 // ``PrunableItem`` from a JSON object.
                 Ok(v) if v.is_object() => out.push(v),
                 Ok(_) => {}
-                Err(e) => warn!(
-                    "podman: dropping malformed JSON line ({}): {}",
-                    e, line
-                ),
+                Err(e) => warn!("podman: dropping malformed JSON line ({}): {}", e, line),
             }
         }
         out
@@ -445,5 +498,55 @@ mod tests {
         // an empty list back (with a warn! log line).
         let parsed = parse_json_maybe_array("[not json");
         assert!(parsed.is_empty());
+    }
+
+    /// Older Podman (or `--format {{json .}}`) emits ``Size`` as a
+    /// human-readable string. We must continue to honour it.
+    #[test]
+    fn podman_image_accepts_string_size() {
+        let json = r#"{"Id":"sha256:abc","Repository":"nginx","Tag":"latest","Size":"142 MB"}"#;
+        let img: PodmanImage = serde_json::from_str(json).expect("string Size should parse");
+        assert_eq!(img.size.as_bytes(), 142 * 1024 * 1024);
+    }
+
+    /// Podman 4.x+ with `--format json` emits ``Size`` as a raw byte
+    /// count integer. This is the regression case: previously the
+    /// scanner raised ``invalid type: integer ..., expected a string``
+    /// and aborted the entire podman scan.
+    #[test]
+    fn podman_image_accepts_integer_size() {
+        let json = r#"{"Id":"sha256:abc","Repository":"nginx","Tag":"latest","Size":2455747898}"#;
+        let img: PodmanImage =
+            serde_json::from_str(json).expect("integer Size must parse without aborting the scan");
+        assert_eq!(img.size.as_bytes(), 2455747898);
+    }
+
+    #[test]
+    fn podman_container_accepts_integer_size() {
+        let json = r#"{"Id":"c1","Names":["web"],"State":"exited","Image":"nginx","Size":12345}"#;
+        let c: PodmanContainer = serde_json::from_str(json).expect("integer Size must parse");
+        assert_eq!(c.size.as_bytes(), 12345);
+    }
+
+    #[test]
+    fn podman_container_accepts_string_size() {
+        let json = r#"{"Id":"c1","Names":["web"],"State":"exited","Image":"nginx","Size":"5 MB"}"#;
+        let c: PodmanContainer = serde_json::from_str(json).expect("string Size should parse");
+        assert_eq!(c.size.as_bytes(), 5 * 1024 * 1024);
+    }
+
+    /// A missing ``Size`` field must fall back to ``SizeField::default``
+    /// (i.e. an empty string → 0 bytes) rather than rejecting the
+    /// whole entry.
+    #[test]
+    fn podman_image_missing_size_defaults_to_zero() {
+        let json = r#"{"Id":"sha256:abc","Repository":"nginx","Tag":"latest"}"#;
+        let img: PodmanImage = serde_json::from_str(json).expect("missing Size must use default");
+        assert_eq!(img.size.as_bytes(), 0);
+    }
+
+    #[test]
+    fn size_field_default_is_empty_string() {
+        assert_eq!(SizeField::default().as_bytes(), 0);
     }
 }

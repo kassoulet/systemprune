@@ -55,7 +55,14 @@ impl Scanner for FlatpakScanner {
         self.base
             .run(
                 // Security: Use `--` to prevent the ID from being interpreted as a flag.
-                &["flatpak", "uninstall", "--delete-data", "-y", "--", &item.id],
+                &[
+                    "flatpak",
+                    "uninstall",
+                    "--delete-data",
+                    "-y",
+                    "--",
+                    &item.id,
+                ],
                 TIMEOUT_SECS,
             )
             .await
@@ -90,7 +97,12 @@ impl FlatpakScanner {
         let (out, _) = self
             .base
             .run(
-                &["flatpak", "list", "--app", "--columns=application,size,runtime"],
+                &[
+                    "flatpak",
+                    "list",
+                    "--app",
+                    "--columns=application,size,runtime",
+                ],
                 TIMEOUT_SECS,
             )
             .await?;
@@ -110,7 +122,11 @@ impl FlatpakScanner {
                 source: self.source().to_string(),
                 category: Category::App,
                 size_bytes: parse_size(&size_str),
-                status: if is_active { Status::Active } else { Status::Unused },
+                status: if is_active {
+                    Status::Active
+                } else {
+                    Status::Unused
+                },
                 extra,
             });
         }

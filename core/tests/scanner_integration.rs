@@ -32,6 +32,7 @@ fn make_script(dir: &std::path::Path, name: &str, body: &str) -> PathBuf {
     let p = dir.join(name);
     std::fs::OpenOptions::new()
         .create(true)
+        .truncate(true)
         .write(true)
         .mode(0o755)
         .open(&p)
@@ -69,7 +70,6 @@ fn find_scanner(source: &str) -> std::sync::Arc<dyn Scanner> {
 
 #[tokio::test]
 async fn podman_marks_in_use_image_as_active() {
-    let _guard = PATH_LOCK.lock().unwrap_or_else(|p| p.into_inner());
     let tmp = TempDir::new().unwrap();
     make_script(
         tmp.path(),
@@ -85,11 +85,13 @@ case "$1" in
 esac
 "#,
     );
-    set_path_locked(tmp.path());
-    let scanner = find_scanner("podman");
+    let scanner = {
+        let _guard = PATH_LOCK.lock().unwrap_or_else(|p| p.into_inner());
+        set_path_locked(tmp.path());
+        find_scanner("podman")
+    };
     let items = scanner.get_items().await.unwrap();
-    let by_id: std::collections::HashMap<_, _> =
-        items.iter().map(|i| (i.id.clone(), i)).collect();
+    let by_id: std::collections::HashMap<_, _> = items.iter().map(|i| (i.id.clone(), i)).collect();
 
     assert_eq!(
         by_id["img-in-use:abcdef012345"].status,
@@ -105,7 +107,6 @@ esac
 
 #[tokio::test]
 async fn docker_skips_malformed_image_json_lines() {
-    let _guard = PATH_LOCK.lock().unwrap_or_else(|p| p.into_inner());
     let tmp = TempDir::new().unwrap();
     make_script(
         tmp.path(),
@@ -128,11 +129,13 @@ case "$1" in
 esac
 "#,
     );
-    set_path_locked(tmp.path());
-    let scanner = find_scanner("docker");
+    let scanner = {
+        let _guard = PATH_LOCK.lock().unwrap_or_else(|p| p.into_inner());
+        set_path_locked(tmp.path());
+        find_scanner("docker")
+    };
     let items = scanner.get_items().await.unwrap();
-    let by_id: std::collections::HashMap<_, _> =
-        items.iter().map(|i| (i.id.clone(), i)).collect();
+    let by_id: std::collections::HashMap<_, _> = items.iter().map(|i| (i.id.clone(), i)).collect();
 
     assert!(!by_id.contains_key("not json at all"));
     assert_eq!(by_id["sha256:abc123dead"].status, Status::Active);
@@ -141,7 +144,6 @@ esac
 
 #[tokio::test]
 async fn docker_keeps_exited_containers() {
-    let _guard = PATH_LOCK.lock().unwrap_or_else(|p| p.into_inner());
     let tmp = TempDir::new().unwrap();
     make_script(
         tmp.path(),
@@ -154,11 +156,16 @@ elif [ "$1" = "images" ]; then
 fi
 "#,
     );
-    set_path_locked(tmp.path());
-    let scanner = find_scanner("docker");
+    let scanner = {
+        let _guard = PATH_LOCK.lock().unwrap_or_else(|p| p.into_inner());
+        set_path_locked(tmp.path());
+        find_scanner("docker")
+    };
     let items = scanner.get_items().await.unwrap();
-    let containers: Vec<_> =
-        items.iter().filter(|i| i.category == Category::Container).collect();
+    let containers: Vec<_> = items
+        .iter()
+        .filter(|i| i.category == Category::Container)
+        .collect();
     assert_eq!(containers.len(), 1);
     assert_eq!(containers[0].status, Status::Stopped);
 }
@@ -169,7 +176,6 @@ fi
 
 #[tokio::test]
 async fn flatpak_marks_running_app_as_active() {
-    let _guard = PATH_LOCK.lock().unwrap_or_else(|p| p.into_inner());
     let tmp = TempDir::new().unwrap();
     make_script(
         tmp.path(),
@@ -188,11 +194,13 @@ if [ "$1" = "ps" ]; then
 fi
 "#,
     );
-    set_path_locked(tmp.path());
-    let scanner = find_scanner("flatpak");
+    let scanner = {
+        let _guard = PATH_LOCK.lock().unwrap_or_else(|p| p.into_inner());
+        set_path_locked(tmp.path());
+        find_scanner("flatpak")
+    };
     let items = scanner.get_items().await.unwrap();
-    let by_id: std::collections::HashMap<_, _> =
-        items.iter().map(|i| (i.id.clone(), i)).collect();
+    let by_id: std::collections::HashMap<_, _> = items.iter().map(|i| (i.id.clone(), i)).collect();
 
     assert_eq!(by_id["org.gimp.GIMP"].status, Status::Active);
     assert_eq!(by_id["org.gimp.GIMP"].category, Category::App);
@@ -206,7 +214,6 @@ fi
 
 #[tokio::test]
 async fn snap_filters_protected_and_marks_running_service() {
-    let _guard = PATH_LOCK.lock().unwrap_or_else(|p| p.into_inner());
     let tmp = TempDir::new().unwrap();
     make_script(
         tmp.path(),
@@ -222,13 +229,19 @@ elif [ "$1" = "services" ]; then
 fi
 "#,
     );
-    set_path_locked(tmp.path());
-    let scanner = find_scanner("snap");
+    let scanner = {
+        let _guard = PATH_LOCK.lock().unwrap_or_else(|p| p.into_inner());
+        set_path_locked(tmp.path());
+        find_scanner("snap")
+    };
     let items = scanner.get_items().await.unwrap();
 
     let names: HashSet<&str> = items.iter().map(|i| i.id.as_str()).collect();
     assert!(names.contains("firefox"));
-    assert!(!names.contains("snapd"), "snapd is protected and must be omitted");
+    assert!(
+        !names.contains("snapd"),
+        "snapd is protected and must be omitted"
+    );
 
     let firefox = items.iter().find(|i| i.id == "firefox").unwrap();
     assert_eq!(firefox.status, Status::Active);
@@ -254,7 +267,6 @@ fi
 
 #[tokio::test]
 async fn conda_lists_and_removes_envs() {
-    let _guard = PATH_LOCK.lock().unwrap_or_else(|p| p.into_inner());
     let tmp = TempDir::new().unwrap();
 
     // Create two real env directories with a file each so
@@ -302,9 +314,11 @@ esac
         marker = marker.display(),
     );
     make_script(tmp.path(), "conda", &script);
-    set_path_locked(tmp.path());
-
-    let scanner = find_scanner("conda");
+    let scanner = {
+        let _guard = PATH_LOCK.lock().unwrap_or_else(|p| p.into_inner());
+        set_path_locked(tmp.path());
+        find_scanner("conda")
+    };
     let items = scanner.get_items().await.unwrap();
 
     // Four envs listed (base + 3), but `base` is skipped by
@@ -316,8 +330,7 @@ esac
         "base env must be skipped by name and staleenv must be skipped by missing path"
     );
 
-    let by_id: std::collections::HashMap<_, _> =
-        items.iter().map(|i| (i.id.clone(), i)).collect();
+    let by_id: std::collections::HashMap<_, _> = items.iter().map(|i| (i.id.clone(), i)).collect();
     let myenv = by_id
         .get(&env_a.display().to_string())
         .expect("myenv must be present");
@@ -370,7 +383,6 @@ esac
 
 #[tokio::test]
 async fn go_cache_reports_and_cleans_via_fake_go_binary() {
-    let _guard = PATH_LOCK.lock().unwrap_or_else(|p| p.into_inner());
     let tmp = TempDir::new().unwrap();
 
     // Create the fake build-cache directory with a file so
@@ -402,9 +414,11 @@ esac
         marker = marker.display(),
     );
     make_script(tmp.path(), "go", &script);
-    set_path_locked(tmp.path());
-
-    let scanner = find_scanner("go_cache");
+    let scanner = {
+        let _guard = PATH_LOCK.lock().unwrap_or_else(|p| p.into_inner());
+        set_path_locked(tmp.path());
+        find_scanner("go_cache")
+    };
     let items = scanner.get_items().await.unwrap();
 
     assert_eq!(
@@ -442,7 +456,6 @@ esac
 
 #[tokio::test]
 async fn go_cache_skips_when_gocache_path_missing() {
-    let _guard = PATH_LOCK.lock().unwrap_or_else(|p| p.into_inner());
     let tmp = TempDir::new().unwrap();
 
     // The fake `go` reports a cache path that does NOT
@@ -458,9 +471,11 @@ fi
         p = missing.display(),
     );
     make_script(tmp.path(), "go", &script);
-    set_path_locked(tmp.path());
-
-    let scanner = find_scanner("go_cache");
+    let scanner = {
+        let _guard = PATH_LOCK.lock().unwrap_or_else(|p| p.into_inner());
+        set_path_locked(tmp.path());
+        find_scanner("go_cache")
+    };
     let items = scanner.get_items().await.unwrap();
     assert!(
         items.is_empty(),
@@ -470,7 +485,6 @@ fi
 
 #[tokio::test]
 async fn go_cache_skips_when_gocache_stdout_is_empty() {
-    let _guard = PATH_LOCK.lock().unwrap_or_else(|p| p.into_inner());
     let tmp = TempDir::new().unwrap();
 
     // The fake `go` returns an empty line for `go env
@@ -481,9 +495,11 @@ async fn go_cache_skips_when_gocache_stdout_is_empty() {
         "go",
         "#!/bin/sh\n[ \"$1 $2\" = \"env GOCACHE\" ] || exit 0\n",
     );
-    set_path_locked(tmp.path());
-
-    let scanner = find_scanner("go_cache");
+    let scanner = {
+        let _guard = PATH_LOCK.lock().unwrap_or_else(|p| p.into_inner());
+        set_path_locked(tmp.path());
+        find_scanner("go_cache")
+    };
     let items = scanner.get_items().await.unwrap();
     assert!(
         items.is_empty(),
@@ -497,15 +513,17 @@ async fn go_cache_skips_when_gocache_stdout_is_empty() {
 
 #[tokio::test]
 async fn base_scanner_run_returns_stderr_on_failure() {
-    let _guard = PATH_LOCK.lock().unwrap_or_else(|p| p.into_inner());
     let tmp = TempDir::new().unwrap();
     make_script(
         tmp.path(),
         "failbin",
         "#!/bin/sh\necho intentional failure 1>&2\nexit 7\n",
     );
-    set_path_locked(tmp.path());
-    let base = BaseScanner::new("failbin", CoreEngine::Docker, "failbin");
+    let base = {
+        let _guard = PATH_LOCK.lock().unwrap_or_else(|p| p.into_inner());
+        set_path_locked(tmp.path());
+        BaseScanner::new("failbin", CoreEngine::Docker, "failbin")
+    };
     let err = base
         .run(&["failbin"], 5)
         .await

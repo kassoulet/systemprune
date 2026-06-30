@@ -3,7 +3,7 @@
 mod window;
 
 use adw::prelude::*;
-use gtk::{glib, gio};
+use gtk::{gio, glib};
 
 const APP_ID: &str = "io.github.systemprune.Gui";
 

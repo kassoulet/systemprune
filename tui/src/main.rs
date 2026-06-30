@@ -1,11 +1,11 @@
 //! Ratatui-based TUI for SystemPrune.
 
-mod app;
-
 use anyhow::Result;
 use clap::Parser;
 use std::io::{stdout, Stdout};
 use std::path::PathBuf;
+
+use systemprune_tui::app;
 
 #[derive(Debug, Parser)]
 #[command(

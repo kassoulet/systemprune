@@ -10,8 +10,8 @@
 use adw::prelude::*;
 use adw::{ActionRow, ExpanderRow, HeaderBar, ToolbarView};
 use gtk::{
-    gio, Box as GtkBox, Button, CheckButton, DropDown, Label, MenuButton,
-    Orientation, ScrolledWindow, Separator, StringList,
+    gio, Box as GtkBox, Button, CheckButton, DropDown, Label, MenuButton, Orientation,
+    ScrolledWindow, Separator, StringList,
 };
 use std::cell::RefCell;
 use std::collections::{BTreeMap, HashSet};
@@ -84,9 +84,7 @@ pub fn build_window(app: &adw::Application) {
     // depending on which view is active so the user always
     // sees the affordance to switch to the *other* view.
     let view_toggle_button = Button::with_label("Show items");
-    view_toggle_button.set_tooltip_text(Some(
-        "Switch to the per-item list view",
-    ));
+    view_toggle_button.set_tooltip_text(Some("Switch to the per-item list view"));
     header.pack_end(&view_toggle_button);
 
     // --- Hamburger menu (About, Log, etc.) ---
@@ -210,11 +208,7 @@ pub fn build_window(app: &adw::Application) {
         let items_scroll_for_toggle = items_scroll.clone();
         let dashboard_scroll_for_toggle = dashboard_scroll.clone();
         view_toggle_button.connect_clicked(move |btn| {
-            on_view_toggle_clicked(
-                btn,
-                &items_scroll_for_toggle,
-                &dashboard_scroll_for_toggle,
-            );
+            on_view_toggle_clicked(btn, &items_scroll_for_toggle, &dashboard_scroll_for_toggle);
         });
     }
 
@@ -278,8 +272,7 @@ pub fn build_window(app: &adw::Application) {
         // (the about window has no signal handlers connected
         // to it), so no `with_rebuilding` wrap is needed.
         if cache_clone.borrow().is_none() {
-            *cache_clone.borrow_mut() =
-                Some(build_about_window(&app_clone, &parent_clone));
+            *cache_clone.borrow_mut() = Some(build_about_window(&app_clone, &parent_clone));
         }
         if let Some(about) = cache_clone.borrow().as_ref() {
             about.present();
@@ -368,10 +361,7 @@ fn present_log_dialog(state: &Rc<RefCell<State>>, parent: &adw::ApplicationWindo
 /// the correct GApplication icon and lifecycle.  All metadata is
 /// hard-coded from the workspace `Cargo.toml` and the `core`
 /// crate's `VERSION` constant.
-fn build_about_window(
-    app: &adw::Application,
-    parent: &adw::ApplicationWindow,
-) -> adw::AboutWindow {
+fn build_about_window(app: &adw::Application, parent: &adw::ApplicationWindow) -> adw::AboutWindow {
     let about = adw::AboutWindow::builder()
         .application_name("SystemPrune")
         .developer_name("SystemPrune Contributors")
@@ -487,7 +477,10 @@ impl State {
         for items in buckets.values_mut() {
             sort_items(items, self.sort_mode);
         }
-        order.into_iter().map(|c| (c, buckets[&c].clone())).collect()
+        order
+            .into_iter()
+            .map(|c| (c, buckets[&c].clone()))
+            .collect()
     }
 }
 
@@ -787,7 +780,8 @@ fn do_delete(
         // valid for the entire `block_on` call.  Prevents the
         // orchestrator from re-queuing items that previously
         // failed (defence in depth).
-        s.runtime.block_on(orch.delete_many(&to_delete, true, Some(&s.delete_errors)))
+        s.runtime
+            .block_on(orch.delete_many(&to_delete, true, Some(&s.delete_errors)))
     } else {
         Vec::new()
     };
@@ -797,16 +791,22 @@ fn do_delete(
         let mut s = state.borrow_mut();
         for r in &results {
             if r.success {
-                s.selected.remove(&(r.item.source.clone(), r.item.id.clone()));
+                s.selected
+                    .remove(&(r.item.source.clone(), r.item.id.clone()));
             }
         }
         // Mark successfully deleted items instead of removing them.
         for r in &results {
             if r.success {
-                if let Some(item) = s.items.iter_mut().find(|i| i.source == r.item.source && i.id == r.item.id) {
+                if let Some(item) = s
+                    .items
+                    .iter_mut()
+                    .find(|i| i.source == r.item.source && i.id == r.item.id)
+                {
                     item.status = systemprune_core::models::Status::Deleted;
                 }
-                s.delete_errors.remove(&(r.item.source.clone(), r.item.id.clone()));
+                s.delete_errors
+                    .remove(&(r.item.source.clone(), r.item.id.clone()));
             } else if let Some(err) = &r.error {
                 let key = (r.item.source.clone(), r.item.id.clone());
                 s.delete_errors.insert(key, err.to_string());
@@ -830,7 +830,11 @@ fn do_delete(
         s.busy = false;
     }
     rebuild_groups(state, groups_box);
-    let freed: i64 = results.iter().filter(|r| r.success).map(|r| r.item.size_bytes as i64).sum();
+    let freed: i64 = results
+        .iter()
+        .filter(|r| r.success)
+        .map(|r| r.item.size_bytes as i64)
+        .sum();
 
     // Final status: standard "Deleted N, failed M. Freed X." plus an
     // optional "Skipped K previously-failed item(s)." tail when any
@@ -956,9 +960,7 @@ fn rebuild_dashboard_widgets(
         action_row.set_tooltip_text(Some(&format!(
             "Switch to the items list ({} item(s) from {} \
              totalling {})",
-            row.count,
-            render.title,
-            render.suffix_text,
+            row.count, render.title, render.suffix_text,
         )));
         let size_label = Label::new(Some(&render.suffix_text));
         size_label.set_xalign(1.0);
@@ -1101,9 +1103,7 @@ fn append_group(
     //     expander row's title bar. Toggles every safe item in this
     //     category in one click, mirroring the TUI's "A" binding. ---
     let toggle_button = Button::with_label("Select all");
-    toggle_button.set_tooltip_text(Some(
-        "Select or deselect every safe item in this group",
-    ));
+    toggle_button.set_tooltip_text(Some("Select or deselect every safe item in this group"));
     toggle_button.set_valign(gtk::Align::Center);
     expander_row.add_suffix(&toggle_button);
 
@@ -1157,8 +1157,7 @@ fn append_group(
         s.group_expander_rows.insert(cat, expander_row.clone());
         s.group_toggle_buttons.insert(cat, toggle_button.clone());
         for (status, btn) in &status_buttons {
-            s.status_toggle_buttons
-                .insert((cat, *status), btn.clone());
+            s.status_toggle_buttons.insert((cat, *status), btn.clone());
         }
     }
 
@@ -1199,10 +1198,7 @@ fn escape_markup(s: &str) -> String {
         .replace('"', "&quot;")
 }
 
-fn make_item_row(
-    state: &Rc<RefCell<State>>,
-    item: &PrunableItem,
-) -> ActionRow {
+fn make_item_row(state: &Rc<RefCell<State>>, item: &PrunableItem) -> ActionRow {
     let key = (item.source.clone(), item.id.clone());
     let initially_selected = {
         let s = state.borrow();
@@ -1297,7 +1293,9 @@ pub(crate) fn describe_item_row(
         Some(err.clone())
     } else if let Some(path) = item.extra.get("path") {
         Some(path.clone())
-    } else { item.extra.get("project_root").cloned() };
+    } else {
+        item.extra.get("project_root").cloned()
+    };
     // `is_deletable_for_real` collapses the two safety predicates
     // (status + previous-failure) into one, so a failed item with
     // `Status::Unused` is correctly treated as non-deletable here.
@@ -1380,11 +1378,7 @@ pub(crate) fn describe_dashboard_row(row: &DashboardRow) -> DashboardRowRender {
             top.name,
             format_size(top.size_bytes as i64, true),
         ),
-        None => format!(
-            "{} \u{2014} {} total",
-            count_str,
-            total_str,
-        ),
+        None => format!("{} \u{2014} {} total", count_str, total_str,),
     };
     DashboardRowRender {
         title: escape_markup(&row.source),
@@ -1527,11 +1521,7 @@ fn build_delete_results_dialog(
     } else {
         render.body.clone()
     };
-    let dialog = adw::MessageDialog::new(
-        Some(parent),
-        Some(&render.heading),
-        Some(&body),
-    );
+    let dialog = adw::MessageDialog::new(Some(parent), Some(&render.heading), Some(&body));
     dialog.add_response("ok", "OK");
     dialog.set_default_response(Some("ok"));
     dialog.set_close_response("ok");
@@ -1592,17 +1582,10 @@ fn on_view_toggle_clicked(
     } else {
         "Show dashboard"
     });
-    btn.set_tooltip_text(Some(
-        "Toggle the per-engine disk-usage dashboard view",
-    ));
+    btn.set_tooltip_text(Some("Toggle the per-engine disk-usage dashboard view"));
 }
 
-fn on_item_toggled(
-    state: &Rc<RefCell<State>>,
-    active: bool,
-    source: &str,
-    id: &str,
-) {
+fn on_item_toggled(state: &Rc<RefCell<State>>, active: bool, source: &str, id: &str) {
     if state.borrow().rebuilding {
         return;
     }
@@ -1621,9 +1604,10 @@ fn on_item_toggled(
         // (The checkbox is also `set_sensitive(false)` for those
         // items, but a programmatic `set_active(true)` could
         // otherwise sneak through.)
-        let present_and_deletable = s.items.iter().any(|i| {
-            i.source == source && i.id == id && i.is_deletable_for_real(&s.delete_errors)
-        });
+        let present_and_deletable = s
+            .items
+            .iter()
+            .any(|i| i.source == source && i.id == id && i.is_deletable_for_real(&s.delete_errors));
         if !present_and_deletable {
             return;
         }
@@ -1860,11 +1844,7 @@ pub(crate) fn compute_status_toggle_button_state(
 /// All <Status>" buttons (e.g. "Select All Dangling"). Mirrors
 /// [`on_group_toggle_clicked`] but filters by `item.status ==
 /// status` so only items in that sub-state are toggled.
-fn on_status_toggle_clicked(
-    state: &Rc<RefCell<State>>,
-    cat: Category,
-    status: Status,
-) {
+fn on_status_toggle_clicked(state: &Rc<RefCell<State>>, cat: Category, status: Status) {
     if state.borrow().rebuilding {
         return;
     }
@@ -1877,9 +1857,7 @@ fn on_status_toggle_clicked(
         s.items
             .iter()
             .filter(|i| {
-                i.category == cat
-                    && i.status == status
-                    && i.is_deletable_for_real(&s.delete_errors)
+                i.category == cat && i.status == status && i.is_deletable_for_real(&s.delete_errors)
             })
             .map(|i| (i.source.clone(), i.id.clone()))
             .collect()
@@ -1944,20 +1922,14 @@ fn on_status_toggle_clicked(
 /// Recompute the per-(cat, status) "Select All <Status>" button's
 /// label and sensitivity. Mirrors [`update_group_toggle_button`]
 /// but counts only items matching `item.status == status`.
-fn update_status_toggle_button(
-    state: &Rc<RefCell<State>>,
-    cat: Category,
-    status: Status,
-) {
+fn update_status_toggle_button(state: &Rc<RefCell<State>>, cat: Category, status: Status) {
     let (safe_for_status_count, selected_for_status_count) = {
         let s = state.borrow();
         let safe = s
             .items
             .iter()
             .filter(|i| {
-                i.category == cat
-                    && i.status == status
-                    && i.is_deletable_for_real(&s.delete_errors)
+                i.category == cat && i.status == status && i.is_deletable_for_real(&s.delete_errors)
             })
             .count();
         let selected = s
@@ -2160,10 +2132,7 @@ mod tests {
         // this item.
         let mut errors = empty_errors();
         let item = make_item("a", "docker", Status::Unused, Category::Image);
-        errors.insert(
-            ("ollama".to_string(), "a".to_string()),
-            "boom".to_string(),
-        );
+        errors.insert(("ollama".to_string(), "a".to_string()), "boom".to_string());
         let render = describe_item_row(&errors, &item);
         assert_eq!(render.title, "a");
         assert_eq!(render.css_class, None);
@@ -2242,7 +2211,9 @@ mod tests {
         let render = describe_delete_results(&results);
         assert_eq!(render.heading, "Deletion failed");
         assert!(render.body.contains("All 2 items failed"));
-        let extra = render.extra_info.expect("extra_info must be present on failure");
+        let extra = render
+            .extra_info
+            .expect("extra_info must be present on failure");
         assert!(extra.contains("permission denied"));
         assert!(extra.contains("model busy"));
         assert!(extra.contains("docker: a"));
@@ -2408,12 +2379,10 @@ mod tests {
     fn status_toggle_button_stopped_uses_stopped_labels() {
         // Generalises beyond Dangling: Stopped also earns a
         // dedicated button (see `Status::select_all_labels`).
-        let r_select =
-            compute_status_toggle_button_state(Status::Stopped, 2, 0);
+        let r_select = compute_status_toggle_button_state(Status::Stopped, 2, 0);
         assert_eq!(r_select.label, "Select All Stopped");
         assert_eq!(r_select.status, Status::Stopped);
-        let r_deselect =
-            compute_status_toggle_button_state(Status::Stopped, 2, 2);
+        let r_deselect = compute_status_toggle_button_state(Status::Stopped, 2, 2);
         assert_eq!(r_deselect.label, "Deselect All Stopped");
     }
 
@@ -2578,10 +2547,10 @@ mod tests {
             // with "RefCell already mutably borrowed".
             on_item_toggled(&state_for_signal, cb.is_active(), "docker", "a");
         });
-        state.borrow_mut().item_checkboxes.insert(
-            ("docker".to_string(), "a".to_string()),
-            checkbox,
-        );
+        state
+            .borrow_mut()
+            .item_checkboxes
+            .insert(("docker".to_string(), "a".to_string()), checkbox);
         state
     }
 
@@ -2614,7 +2583,8 @@ mod tests {
         // group into `selected`; verify the item is now there.
         let s = state.borrow();
         assert!(
-            s.selected.contains(&("docker".to_string(), "a".to_string())),
+            s.selected
+                .contains(&("docker".to_string(), "a".to_string())),
             "expected item to be selected after group-toggle click"
         );
     }
@@ -2642,7 +2612,8 @@ mod tests {
         // The "deselect all" branch should have removed the item.
         let s = state.borrow();
         assert!(
-            !s.selected.contains(&("docker".to_string(), "a".to_string())),
+            !s.selected
+                .contains(&("docker".to_string(), "a".to_string())),
             "expected item to be deselected after group-toggle click"
         );
     }
@@ -2865,13 +2836,7 @@ mod tests {
         // mirroring the `append_group` subtitle contract.
         // Forgetting the singular branch is a common bug in
         // iteration log strings; this test exists to catch it.
-        let row = make_dashboard_row(
-            "podman",
-            1,
-            4 * 1024_u64.pow(3),
-            None,
-            None,
-        );
+        let row = make_dashboard_row("podman", 1, 4 * 1024_u64.pow(3), None, None);
         let render = describe_dashboard_row(&row);
         assert_eq!(render.title, "podman");
         assert!(
@@ -2939,17 +2904,10 @@ mod tests {
         // is left raw by this helper on purpose; the call
         // site (`rebuild_dashboard_widgets`) wraps
         // `render.subtitle` in another `escape_markup`.
-        let row = make_dashboard_row(
-            "weird&name<tag>",
-            2,
-            4 * 1024_u64.pow(3),
-            None,
-            None,
-        );
+        let row = make_dashboard_row("weird&name<tag>", 2, 4 * 1024_u64.pow(3), None, None);
         let render = describe_dashboard_row(&row);
         assert_eq!(
-            render.title,
-            "weird&amp;name&lt;tag&gt;",
+            render.title, "weird&amp;name&lt;tag&gt;",
             "title must be Pango-escaped so ActionRow::set_title doesn't crash"
         );
         // Subtitle does NOT include the source name here

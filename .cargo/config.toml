@@ -1,0 +1,16 @@
+# Project-local Cargo configuration.
+#
+# We pin `target-dir` to the workspace root so the README's
+# `./target/release/{systemprune,systemprune-tui,systemprune-gui}`
+# paths work as written for every contributor.
+#
+# Why this matters: a user's `~/.cargo/config.toml` may set a global
+# `target-dir` override (e.g. a relative path that resolves under
+# `$HOME`). Cargo applies project-local config before user-global
+# config, so the same key here wins for this project only, leaving
+# every other workspace the user builds unaffected.
+#
+# The path is intentionally relative ("target"), which Cargo
+# interprets relative to the workspace root, not `$HOME`.
+[build]
+target-dir = "target"

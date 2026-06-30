@@ -87,8 +87,20 @@ fn make_stub(
 
 #[tokio::test]
 async fn filters_unavailable_scanners() {
-    let a = make_stub("a", Engine::Docker, true, false, Arc::new(DeleteCounter::default()));
-    let b = make_stub("b", Engine::Ollama, false, false, Arc::new(DeleteCounter::default()));
+    let a = make_stub(
+        "a",
+        Engine::Docker,
+        true,
+        false,
+        Arc::new(DeleteCounter::default()),
+    );
+    let b = make_stub(
+        "b",
+        Engine::Ollama,
+        false,
+        false,
+        Arc::new(DeleteCounter::default()),
+    );
     let orch = Orchestrator::new(vec![a, b]);
     assert_eq!(orch.available_engines(), vec!["a".to_string()]);
     assert_eq!(orch.all_scanners().len(), 2);
@@ -173,7 +185,10 @@ async fn scan_result_groups_items_by_category() {
     };
     let grouped = result.by_category();
     let cats: Vec<Category> = grouped.iter().map(|(c, _)| *c).collect();
-    assert_eq!(cats, vec![Category::Image, Category::Volume, Category::Model]);
+    assert_eq!(
+        cats,
+        vec![Category::Image, Category::Volume, Category::Model]
+    );
     assert_eq!(grouped[0].1.len(), 2); // two images
     assert_eq!(grouped[1].1.len(), 1); // one volume
     assert_eq!(grouped[2].1.len(), 1); // one model
@@ -346,9 +361,7 @@ async fn delete_many_rejects_items_in_delete_errors_map() {
         "permission denied".to_string(),
     );
 
-    let results = orch
-        .delete_many(&[item], true, Some(&delete_errors))
-        .await;
+    let results = orch.delete_many(&[item], true, Some(&delete_errors)).await;
     assert_eq!(results.len(), 1);
     assert!(!results[0].success);
     let err = results[0]
@@ -362,7 +375,10 @@ async fn delete_many_rejects_items_in_delete_errors_map() {
     assert_eq!(results[0].item.status, Status::Unused);
     // The scanner was *not* called for the rejected item.
     let calls = counter.0.lock().unwrap();
-    assert!(calls.is_empty(), "scanner must not be invoked for rejected items");
+    assert!(
+        calls.is_empty(),
+        "scanner must not be invoked for rejected items"
+    );
 }
 
 #[tokio::test]
@@ -398,13 +414,22 @@ async fn delete_many_delete_errors_only_blocks_matching_keys() {
     );
 
     let results = orch
-        .delete_many(&[matched, same_source, different_source], true, Some(&delete_errors))
+        .delete_many(
+            &[matched, same_source, different_source],
+            true,
+            Some(&delete_errors),
+        )
         .await;
     assert_eq!(results.len(), 3);
     // `matched` is blocked: its `(docker, "bad")` key matches an
     // entry in `delete_errors` exactly.
     assert!(!results[0].success);
-    assert!(results[0].error.as_ref().unwrap().message.contains("previously failed"));
+    assert!(results[0]
+        .error
+        .as_ref()
+        .unwrap()
+        .message
+        .contains("previously failed"));
     // `same_source` is docker with id="other" \u2014 not in
     // `delete_errors`, so the tie-breaker does not fire. The
     // orchestrator dispatches it to the docker scanner, which
@@ -415,7 +440,12 @@ async fn delete_many_delete_errors_only_blocks_matching_keys() {
     // `delete_errors` either, but the orchestrator has no ollama
     // scanner, so it falls through to the "No active scanner" path.
     assert!(!results[2].success);
-    assert!(results[2].error.as_ref().unwrap().message.contains("No active scanner"));
+    assert!(results[2]
+        .error
+        .as_ref()
+        .unwrap()
+        .message
+        .contains("No active scanner"));
     // The scanner was invoked exactly once, for the non-blocked
     // docker item.
     let calls = counter.0.lock().unwrap();
@@ -433,12 +463,7 @@ async fn delete_many_delete_errors_only_blocks_matching_keys() {
 /// Convenience factory: a docker image with the given id, name,
 /// size, and status.  Keeps the `Dashboard` tests focused on
 /// grouping/sorting behaviour rather than boilerplate.
-fn docker_image(
-    id: &str,
-    name: &str,
-    size_bytes: u64,
-    status: Status,
-) -> PrunableItem {
+fn docker_image(id: &str, name: &str, size_bytes: u64, status: Status) -> PrunableItem {
     PrunableItem {
         id: id.to_string(),
         name: name.to_string(),
@@ -451,12 +476,7 @@ fn docker_image(
     }
 }
 
-fn ollama_model(
-    id: &str,
-    name: &str,
-    size_bytes: u64,
-    status: Status,
-) -> PrunableItem {
+fn ollama_model(id: &str, name: &str, size_bytes: u64, status: Status) -> PrunableItem {
     PrunableItem {
         id: id.to_string(),
         name: name.to_string(),
@@ -481,17 +501,23 @@ fn dashboard_compute_empty_scan_is_empty() {
 fn dashboard_compute_single_engine_groups_all_items() {
     let items = vec![
         docker_image("a", "rust:bookworm", 4_000_000_000, Status::Unused),
-        docker_image("b", "node:20",    2_000_000_000, Status::Unused),
-        docker_image("c", "alpine:3",     100_000_000, Status::Unused),
+        docker_image("b", "node:20", 2_000_000_000, Status::Unused),
+        docker_image("c", "alpine:3", 100_000_000, Status::Unused),
     ];
-    let scan = ScanResult { items, errors: vec![] };
+    let scan = ScanResult {
+        items,
+        errors: vec![],
+    };
     let dash = Dashboard::compute(&scan);
     assert_eq!(dash.rows.len(), 1);
     let row = &dash.rows[0];
     assert_eq!(row.source, "docker");
     assert_eq!(row.count, 3);
     assert_eq!(row.total_bytes, 6_100_000_000);
-    let top = row.top.as_ref().expect("dashboard row with items has a top item");
+    let top = row
+        .top
+        .as_ref()
+        .expect("dashboard row with items has a top item");
     assert_eq!(top.name, "rust:bookworm");
     assert_eq!(top.size_bytes, 4_000_000_000);
     assert_eq!(top.id, "a");
@@ -528,7 +554,10 @@ fn dashboard_compute_sorts_rows_by_total_desc_with_deterministic_tiebreak() {
             extra: Default::default(),
         },
     ];
-    let scan = ScanResult { items, errors: vec![] };
+    let scan = ScanResult {
+        items,
+        errors: vec![],
+    };
     let dash = Dashboard::compute(&scan);
     let sources: Vec<&str> = dash.rows.iter().map(|r| r.source.as_str()).collect();
     // Descending totals: ollama (9.9K), flatpak (500), snap (500),
@@ -540,12 +569,15 @@ fn dashboard_compute_sorts_rows_by_total_desc_with_deterministic_tiebreak() {
 #[test]
 fn dashboard_compute_top_item_picks_largest_in_group() {
     let items = vec![
-        docker_image("tiny",   "tiny:latest",        100, Status::Unused),
-        docker_image("medium", "medium:latest",   50_000, Status::Unused),
-        docker_image("big",    "big:latest", 2_000_000_000, Status::Unused),
-        docker_image("med2",   "med2:latest",     70_000, Status::Unused),
+        docker_image("tiny", "tiny:latest", 100, Status::Unused),
+        docker_image("medium", "medium:latest", 50_000, Status::Unused),
+        docker_image("big", "big:latest", 2_000_000_000, Status::Unused),
+        docker_image("med2", "med2:latest", 70_000, Status::Unused),
     ];
-    let scan = ScanResult { items, errors: vec![] };
+    let scan = ScanResult {
+        items,
+        errors: vec![],
+    };
     let dash = Dashboard::compute(&scan);
     let top = dash.rows[0].top.as_ref().expect("top item present");
     // "big" is the unique maximum so the result is unambiguous.
@@ -564,7 +596,10 @@ fn dashboard_compute_includes_active_items_in_count_and_total() {
         docker_image("a", "a", 100, Status::Unused),
         docker_image("b", "b", 200, Status::Active),
     ];
-    let scan = ScanResult { items, errors: vec![] };
+    let scan = ScanResult {
+        items,
+        errors: vec![],
+    };
     let dash = Dashboard::compute(&scan);
     assert_eq!(dash.rows.len(), 1);
     assert_eq!(dash.rows[0].count, 2);
@@ -577,7 +612,10 @@ fn dashboard_grand_total_matches_sum_across_rows() {
         docker_image("a", "a", 100, Status::Unused),
         ollama_model("o", "o", 200, Status::Unused),
     ];
-    let scan = ScanResult { items, errors: vec![] };
+    let scan = ScanResult {
+        items,
+        errors: vec![],
+    };
     let dash = Dashboard::compute(&scan);
     assert_eq!(dash.grand_total(), 300);
 }
@@ -599,24 +637,24 @@ fn dashboard_format_text_contains_header_and_each_row() {
     let four_gib = 4_u64 * 1024 * 1024 * 1024;
     let items = vec![
         docker_image("big", "big:latest", four_gib, Status::Unused),
-        docker_image("sm",  "sm:latest",        100, Status::Unused),
+        docker_image("sm", "sm:latest", 100, Status::Unused),
     ];
-    let scan = ScanResult { items, errors: vec![] };
+    let scan = ScanResult {
+        items,
+        errors: vec![],
+    };
     let text = Dashboard::compute(&scan).format_text();
     assert!(text.contains("Engine"), "header column 'Engine': {text}");
     assert!(text.contains("Items"), "header column 'Items': {text}");
     assert!(text.contains("Total"), "header column 'Total': {text}");
-    assert!(text.contains("Top item"), "header column 'Top item': {text}");
+    assert!(
+        text.contains("Top item"),
+        "header column 'Top item': {text}"
+    );
     assert!(text.contains("docker"), "engine name appears: {text}");
     assert!(text.contains("2"), "count 2 appears: {text}");
-    assert!(
-        text.contains("big:latest"),
-        "top item name appears: {text}"
-    );
-    assert!(
-        text.contains("4.0 GiB"),
-        "4.0 GiB appears in table: {text}"
-    );
+    assert!(text.contains("big:latest"), "top item name appears: {text}");
+    assert!(text.contains("4.0 GiB"), "4.0 GiB appears in table: {text}");
 }
 
 #[test]
@@ -625,9 +663,15 @@ fn dashboard_format_text_truncates_long_top_item_names() {
     // truncation adds an ellipsis so the column stays tidy.
     let big_name = "a".repeat(200);
     let items = vec![docker_image("big", &big_name, 1_000, Status::Unused)];
-    let scan = ScanResult { items, errors: vec![] };
+    let scan = ScanResult {
+        items,
+        errors: vec![],
+    };
     let text = Dashboard::compute(&scan).format_text();
-    assert!(text.contains('\u{2026}'), "ellipsis marks truncation: {text}");
+    assert!(
+        text.contains('\u{2026}'),
+        "ellipsis marks truncation: {text}"
+    );
     assert!(
         !text.contains(&big_name),
         "full name was not truncated: {text}"

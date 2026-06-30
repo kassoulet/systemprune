@@ -56,7 +56,11 @@ pub fn find_dirs_named(root: &Path, dir_name: &str, exclude: &[&str]) -> Vec<(Pa
 /// Returns `(path, size_bytes)` for each match.
 ///
 /// `exclude` is a list of directory names to skip entirely (and not recurse into).
-pub fn find_dirs_with_marker(root: &Path, marker_file: &str, exclude: &[&str]) -> Vec<(PathBuf, u64)> {
+pub fn find_dirs_with_marker(
+    root: &Path,
+    marker_file: &str,
+    exclude: &[&str],
+) -> Vec<(PathBuf, u64)> {
     let mut results = Vec::new();
     for entry in WalkDir::new(root)
         .follow_links(false)

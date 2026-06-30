@@ -29,12 +29,13 @@ pub mod sort;
 pub use errors::{EngineError, ParseError, SystemPruneError};
 pub use history::{
     command_for as history_command_for, history_path as default_history_path, History,
-    HistoryEntry, DEFAULT_HISTORY_LIMIT, DEFAULT_KEEP_FILES, DEFAULT_MAX_BYTES,
-    HISTORY_VERSION,
+    HistoryEntry, DEFAULT_HISTORY_LIMIT, DEFAULT_KEEP_FILES, DEFAULT_MAX_BYTES, HISTORY_VERSION,
 };
 pub use log::{system_time_to_rfc3339, ActionLog, LogEntry, LogLevel};
 pub use models::{Category, Engine, PrunableItem, Status};
-pub use orchestrator::{Dashboard, DashboardRow, DashboardTopItem, DeleteResult, Orchestrator, ScanResult};
+pub use orchestrator::{
+    Dashboard, DashboardRow, DashboardTopItem, DeleteResult, Orchestrator, ScanResult,
+};
 pub use probe::{probe_engines, which};
 pub use scanners::Scanner;
 pub use size::{format_size, parse_size};

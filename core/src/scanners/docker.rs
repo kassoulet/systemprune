@@ -125,15 +125,16 @@ impl DockerScanner {
         let active = self.active_container_image_ids().await;
         let (out, _) = self
             .base
-            .run(&["docker", "images", "-a", "--format", "{{json .}}"], TIMEOUT_SECS)
+            .run(
+                &["docker", "images", "-a", "--format", "{{json .}}"],
+                TIMEOUT_SECS,
+            )
             .await?;
         // Docker's `docker ps` may return short (12-char) IDs while
         // `docker images` returns long (`sha256:...`) IDs. Normalise
         // both to the first 12 hex characters for comparison.
-        let active_short: std::collections::HashSet<String> = active
-            .iter()
-            .map(|id| short_image_id(id))
-            .collect();
+        let active_short: std::collections::HashSet<String> =
+            active.iter().map(|id| short_image_id(id)).collect();
         let mut items: Vec<PrunableItem> = Vec::new();
         for line in out.lines() {
             let line = line.trim();
@@ -193,7 +194,10 @@ impl DockerScanner {
     async fn list_containers(&self) -> Result<Vec<PrunableItem>, EngineError> {
         let (out, _) = self
             .base
-            .run(&["docker", "ps", "-a", "--format", "{{json .}}"], TIMEOUT_SECS)
+            .run(
+                &["docker", "ps", "-a", "--format", "{{json .}}"],
+                TIMEOUT_SECS,
+            )
             .await?;
         let mut items: Vec<PrunableItem> = Vec::new();
         for line in out.lines() {
@@ -245,7 +249,10 @@ impl DockerScanner {
         let volume_sizes = self.volume_size_map().await;
         let (out, _) = self
             .base
-            .run(&["docker", "volume", "ls", "--format", "{{json .}}"], TIMEOUT_SECS)
+            .run(
+                &["docker", "volume", "ls", "--format", "{{json .}}"],
+                TIMEOUT_SECS,
+            )
             .await?;
         let mut items: Vec<PrunableItem> = Vec::new();
         for line in out.lines() {
@@ -305,7 +312,11 @@ impl DockerScanner {
                 continue;
             }
             // Stop if we hit the next section (Build Cache, etc.).
-            if in_volumes_section && (line.starts_with("Build Cache") || line.starts_with("Images") || line.starts_with("Containers")) {
+            if in_volumes_section
+                && (line.starts_with("Build Cache")
+                    || line.starts_with("Images")
+                    || line.starts_with("Containers"))
+            {
                 in_volumes_section = false;
                 continue;
             }
@@ -331,7 +342,10 @@ impl DockerScanner {
     async fn list_networks(&self) -> Result<Vec<PrunableItem>, EngineError> {
         let (out, _) = self
             .base
-            .run(&["docker", "network", "ls", "--format", "{{json .}}"], TIMEOUT_SECS)
+            .run(
+                &["docker", "network", "ls", "--format", "{{json .}}"],
+                TIMEOUT_SECS,
+            )
             .await?;
         let mut items: Vec<PrunableItem> = Vec::new();
         for line in out.lines() {
@@ -375,7 +389,10 @@ impl DockerScanner {
     async fn active_container_image_ids(&self) -> std::collections::HashSet<String> {
         let Ok((out, _)) = self
             .base
-            .run(&["docker", "ps", "--format", "{{.Image}} {{.ImageID}}"], TIMEOUT_SECS)
+            .run(
+                &["docker", "ps", "--format", "{{.Image}} {{.ImageID}}"],
+                TIMEOUT_SECS,
+            )
             .await
         else {
             return std::collections::HashSet::new();

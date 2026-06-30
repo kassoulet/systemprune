@@ -28,7 +28,9 @@ impl ScanResult {
     pub fn by_engine(&self) -> BTreeMap<String, Vec<PrunableItem>> {
         let mut out: BTreeMap<String, Vec<PrunableItem>> = BTreeMap::new();
         for item in &self.items {
-            out.entry(item.source.clone()).or_default().push(item.clone());
+            out.entry(item.source.clone())
+                .or_default()
+                .push(item.clone());
         }
         out
     }
@@ -39,8 +41,7 @@ impl ScanResult {
     /// items within each category.
     pub fn by_category(&self) -> Vec<(crate::models::Category, Vec<PrunableItem>)> {
         let mut order: Vec<crate::models::Category> = Vec::new();
-        let mut buckets: BTreeMap<crate::models::Category, Vec<PrunableItem>> =
-            BTreeMap::new();
+        let mut buckets: BTreeMap<crate::models::Category, Vec<PrunableItem>> = BTreeMap::new();
         for item in &self.items {
             if !buckets.contains_key(&item.category) {
                 order.push(item.category);
@@ -185,12 +186,15 @@ impl Dashboard {
             .unwrap_or(6)
             .clamp(8, 20);
         let size_w = 9; // "999.9 GiB" is 10 chars; we right-align at 9
-        // Fixed column width for the unconstrained "Top item"
-        // cell so the divider line + per-row lines share the
-        // same geometry.  See `truncate(s, TOP_CELL_WIDTH)` below.
+                        // Fixed column width for the unconstrained "Top item"
+                        // cell so the divider line + per-row lines share the
+                        // same geometry.  See `truncate(s, TOP_CELL_WIDTH)` below.
         out.push_str(&format!(
             "{:<source_w$}  {:>6}  {:>size_w$}  {}\n",
-            "Engine", "Items", "Total", "Top item",
+            "Engine",
+            "Items",
+            "Total",
+            "Top item",
             source_w = source_w,
             size_w = size_w,
         ));
@@ -198,11 +202,7 @@ impl Dashboard {
         out.push_str(&format!("{}\n", "-".repeat(divider_width)));
         for row in &self.rows {
             let top_repr = match &row.top {
-                Some(t) => format!(
-                    "{} ({})",
-                    t.name,
-                    format_size(t.size_bytes as i64, true)
-                ),
+                Some(t) => format!("{} ({})", t.name, format_size(t.size_bytes as i64, true)),
                 None => "-".to_string(),
             };
             out.push_str(&format!(
@@ -334,6 +334,24 @@ impl Orchestrator {
     }
 
     /// Run `get_items` on every active scanner in parallel.
+    /// Run `get_items` on every active scanner in parallel.
+    ///
+    /// # UI-thread safety
+    ///
+    /// Many scanners shell out to CLIs (`docker images`,
+    /// `podman ps`, `conda env list`, `flatpak list`,
+    /// `snap services`, ...) and each one can take seconds to
+    /// run.  Awaiting this future on a GUI main thread
+    /// monopolises the calling thread and triggers GTK's
+    /// "Application not responsive" dialog after roughly
+    /// five seconds of no progress.  Schedule the work on a
+    /// worker thread instead — e.g.
+    /// `tokio::runtime::Handle::spawn(...)` — and bridge the
+    /// resulting [`ScanResult`] back to the UI thread via
+    /// `glib::MainContext::spawn_local(...)` (or the
+    /// equivalent for TUI / CLI frontends).  Doing so is the
+    /// only way to keep the application responsive while
+    /// scanners fan out across subprocesses.
     pub async fn scan_all(&self) -> ScanResult {
         if let Some(log) = &self.log {
             log.info(format!(
@@ -407,6 +425,27 @@ impl Orchestrator {
     /// *items*; entries for items that had no matching scanner or
     /// whose owning task failed to join are still present (with
     /// `success = false` and a synthetic `EngineError`).
+    /// Delete the given items via their owning scanner.
+    ///
+    /// # UI-thread safety
+    ///
+    /// This future awaits every per-item deletion plus a
+    /// history-log write, so on a meaningful batch it can
+    /// easily take seconds.  Awaiting it on a GUI main
+    /// thread monopolises the thread for the entire
+    /// duration and triggers GTK's "Application not
+    /// responsive" dialog.  Schedule the work on a worker
+    /// thread instead — e.g.
+    /// `tokio::runtime::Handle::spawn(...)` — and bridge the
+    /// resulting `Vec<DeleteResult>` back to the UI thread
+    /// via `glib::MainContext::spawn_local(...)` (or the
+    /// equivalent for TUI / CLI frontends).
+    ///
+    /// The GUI's `do_delete` follows this exact pattern:
+    /// spawn on a tokio worker, post the `Vec<DeleteResult>`
+    /// over a oneshot, and let the GTK main loop pick the
+    /// result up off the GLib main context so the window
+    /// stays responsive throughout.
     pub async fn delete_many(
         &self,
         items: &[PrunableItem],
@@ -435,8 +474,7 @@ impl Orchestrator {
         // Receivers to await after spawning all the delete tasks.
         // Each entry remembers the originating index so we can
         // write the result back to the correct slot.
-        let mut pending: Vec<(usize, tokio::sync::oneshot::Receiver<DeleteResult>)> =
-            Vec::new();
+        let mut pending: Vec<(usize, tokio::sync::oneshot::Receiver<DeleteResult>)> = Vec::new();
         // Buffered history entries.  We build these per-task as
         // results arrive but persist them in a single batch after
         // the receiver loop so concurrent tasks do not race on the
@@ -533,9 +571,7 @@ impl Orchestrator {
                         if result.success {
                             log.info(format!(
                                 "Deleted {}:{} ({} bytes)",
-                                result.item.source,
-                                result.item.id,
-                                result.item.size_bytes
+                                result.item.source, result.item.id, result.item.size_bytes
                             ));
                         } else {
                             let msg = result
@@ -567,10 +603,7 @@ impl Orchestrator {
                         history_entries.push(HistoryEntry::from_result(
                             &result.item,
                             result.success,
-                            result
-                                .error
-                                .as_ref()
-                                .and_then(|e| e.returncode),
+                            result.error.as_ref().and_then(|e| e.returncode),
                             now,
                         ));
                     }
@@ -608,10 +641,7 @@ impl Orchestrator {
                         history_entries.push(HistoryEntry::from_result(
                             &cancel_result.item,
                             cancel_result.success,
-                            cancel_result
-                                .error
-                                .as_ref()
-                                .and_then(|e| e.returncode),
+                            cancel_result.error.as_ref().and_then(|e| e.returncode),
                             now,
                         ));
                     }
@@ -666,8 +696,14 @@ impl Orchestrator {
 impl std::fmt::Debug for Orchestrator {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("Orchestrator")
-            .field("all", &self.all.iter().map(|s| s.source()).collect::<Vec<_>>())
-            .field("active", &self.active.iter().map(|s| s.source()).collect::<Vec<_>>())
+            .field(
+                "all",
+                &self.all.iter().map(|s| s.source()).collect::<Vec<_>>(),
+            )
+            .field(
+                "active",
+                &self.active.iter().map(|s| s.source()).collect::<Vec<_>>(),
+            )
             .finish()
     }
 }

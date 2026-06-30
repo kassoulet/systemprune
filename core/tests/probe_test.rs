@@ -8,6 +8,7 @@ fn make_fake_binary(dir: &std::path::Path, name: &str) -> std::path::PathBuf {
     let bin = dir.join(name);
     std::fs::OpenOptions::new()
         .create(true)
+        .truncate(true)
         .write(true)
         .mode(0o755)
         .open(&bin)

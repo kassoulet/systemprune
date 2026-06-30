@@ -118,7 +118,9 @@ impl Category {
 }
 
 /// The runtime status of an asset.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Default, Serialize, Deserialize)]
+#[derive(
+    Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Default, Serialize, Deserialize,
+)]
 #[serde(rename_all = "lowercase")]
 pub enum Status {
     Active,
@@ -163,12 +165,8 @@ impl Status {
     /// * `Deleted` — already gone, no selection target.
     pub fn select_all_labels(self) -> Option<(&'static str, &'static str)> {
         match self {
-            Status::Dangling => {
-                Some(("Select All Dangling", "Deselect All Dangling"))
-            }
-            Status::Stopped => {
-                Some(("Select All Stopped", "Deselect All Stopped"))
-            }
+            Status::Dangling => Some(("Select All Dangling", "Deselect All Dangling")),
+            Status::Stopped => Some(("Select All Stopped", "Deselect All Stopped")),
             Status::Active | Status::Unused | Status::Deleted => None,
         }
     }

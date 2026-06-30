@@ -20,7 +20,9 @@
 //! deviation is noted in `more.md` and `IMPLEMENTATION_STATUS.md`.
 
 use anyhow::Result;
-use crossterm::event::{self, Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers, MouseEvent, MouseButton};
+use crossterm::event::{
+    self, Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers, MouseButton, MouseEvent,
+};
 use ratatui::layout::{Constraint, Direction, Layout, Rect};
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
@@ -71,9 +73,9 @@ enum DisplayRow {
     Item(usize),
 }
 
-struct App {
+pub struct App {
     orchestrator: Orchestrator,
-    items: Vec<PrunableItem>,
+    pub items: Vec<PrunableItem>,
     selected: HashSet<(String, String)>,
     table_state: TableState,
     status: String,
@@ -85,7 +87,7 @@ struct App {
     /// Cached sidebar area for hit testing.
     sidebar_area: Rect,
     /// Set to true when the user presses q/Esc to quit.
-    quit: bool,
+    pub quit: bool,
     /// Error messages for failed deletions, keyed by (source, id).
     delete_errors: BTreeMap<(String, String), String>,
     /// Active sort mode for items within each category group.
@@ -108,7 +110,8 @@ struct App {
 }
 
 impl App {
-    fn new() -> Self {
+    #[allow(clippy::new_without_default)]
+    pub fn new() -> Self {
         Self {
             orchestrator: Orchestrator::new(all_scanners()),
             items: Vec::new(),
@@ -125,6 +128,28 @@ impl App {
             log: ActionLog::default(),
             show_log: false,
             show_dashboard: false,
+        }
+    }
+
+    /// Build an `App` with an empty orchestrator (no scanners
+    /// attached).  Used by the integration tests in
+    /// `tui/tests/smoke.rs` to render frames whose sidebar
+    /// emits "No engines detected" regardless of which
+    /// engine CLIs happen to be installed on the test host.
+    /// Production callers should use [`App::new`] so the
+    /// real registry is wired up.
+    pub fn empty() -> Self {
+        // Struct-update syntax reuses [`App::new`]`s full field
+        // initialisation so adding a field to `App` automatically
+        // propagates here.  Side-effect cost: `Self::new` runs
+        // `all_scanners()` once (builds the registry) and the
+        // orchestrator is then replaced; acceptable for a
+        // test-only constructor.
+        Self {
+            orchestrator: Orchestrator::new(vec![]),
+            status: String::new(),
+            busy: false,
+            ..Self::new()
         }
     }
 
@@ -175,7 +200,7 @@ impl App {
     /// first-seen order of the scan.  `SortMode::Default` is a
     /// no-op so the default UX is identical to the pre-sort
     /// behaviour.
-    fn rebuild_display_rows(&mut self) {
+    pub fn rebuild_display_rows(&mut self) {
         self.display_rows.clear();
         // Group by category, preserving first-seen order, using a
         // parallel BTreeMap for the buckets.
@@ -208,14 +233,10 @@ impl App {
                     indices.sort_by(|&a, &b| items[a].name.cmp(&items[b].name));
                 }
                 SortMode::SizeDesc => {
-                    indices.sort_by(|&a, &b| {
-                        items[b].size_bytes.cmp(&items[a].size_bytes)
-                    });
+                    indices.sort_by(|&a, &b| items[b].size_bytes.cmp(&items[a].size_bytes));
                 }
                 SortMode::SizeAsc => {
-                    indices.sort_by(|&a, &b| {
-                        items[a].size_bytes.cmp(&items[b].size_bytes)
-                    });
+                    indices.sort_by(|&a, &b| items[a].size_bytes.cmp(&items[b].size_bytes));
                 }
             }
             let count = indices.len();
@@ -263,7 +284,21 @@ impl App {
         }
     }
 
-    fn render(&mut self, terminal: &mut TerminalType) -> Result<()> {
+    /// Render one frame to a generic ratatui terminal.
+    ///
+    /// The function is generic over the `Backend` so the same
+    /// render path runs against the production
+    /// `CrosstermBackend<Stdout>` in `main` and against
+    /// `ratatui::backend::TestBackend` in the in-module smoke
+    /// tests below.  This is the standard ratatui idiom for
+    /// shape-checking the UI without a real terminal: a buffer
+    /// of cells captures one frame's output, and we assert on
+    /// the captured text instead of running tmux/crossterm in
+    /// CI.
+    fn render<B: ratatui::backend::Backend>(
+        &mut self,
+        terminal: &mut ratatui::Terminal<B>,
+    ) -> Result<()> {
         terminal.draw(|f| {
             let chunks = Layout::default()
                 .direction(Direction::Vertical)
@@ -292,7 +327,34 @@ impl App {
         Ok(())
     }
 
-    fn handle_key(&mut self, key: KeyEvent) {
+    /// Render one frame to an in-memory cell buffer
+    /// (`ratatui::backend::TestBackend`) for headless
+    /// verification of the full UI render path
+    /// (`draw_header`, `draw_sidebar`, `draw_table`,
+    /// `draw_status`).  Used by both the in-module `mod tests`
+    /// and the integration tests in `tui/tests/smoke.rs` so
+    /// the smoke battery runs under `cargo test` without a
+    /// real terminal / tmux / Xvfb.  Production code paths
+    /// should never call this directly — it exists solely to
+    /// support headless verification.
+    pub fn render_to_buffer(&mut self, width: u16, height: u16) -> ratatui::buffer::Buffer {
+        let backend = ratatui::backend::TestBackend::new(width, height);
+        // `Terminal::new(test_backend)` returns `Result` for the
+        // generic I/O backend; with `TestBackend` the construction
+        // is infallible for positive dimensions, so panic with a
+        // clear message if a future ratatui change breaks that
+        // invariant.
+        let mut terminal = ratatui::Terminal::new(backend)
+            .expect("ratatui::Terminal::new on TestBackend must not fail");
+        // `render` only writes into the in-memory buffer (no
+        // stdout / I/O), so a panic here indicates a real bug
+        // in the TUI render path, not a CI artifact.
+        self.render(&mut terminal)
+            .expect("TUI render must not fail under TestBackend");
+        terminal.backend().buffer().clone()
+    }
+
+    pub fn handle_key(&mut self, key: KeyEvent) {
         if key.kind != KeyEventKind::Press {
             return;
         }
@@ -335,9 +397,7 @@ impl App {
                     0
                 };
                 self.status = if self.show_dashboard {
-                    format!(
-                        "Dashboard ({row_count} item(s) scanned). D=items, l=log, q=quit."
-                    )
+                    format!("Dashboard ({row_count} item(s) scanned). D=items, l=log, q=quit.")
                 } else {
                     "Back to items.".to_string()
                 };
@@ -354,10 +414,7 @@ impl App {
                 // bind `S` to one.
                 self.sort_mode = self.sort_mode.next();
                 self.rebuild_display_rows();
-                self.status = format!(
-                    "Sort: {} (press s again to change)",
-                    self.sort_mode.label()
-                );
+                self.status = format!("Sort: {} (press s again to change)", self.sort_mode.label());
             }
             KeyCode::Char('a') if shift => self.toggle_select_all_at_cursor(),
             KeyCode::Char('a') => self.toggle_all_flat(),
@@ -425,7 +482,9 @@ impl App {
                     String::new()
                 }
             }
-            Some(DisplayRow::Group { category, count, .. }) => {
+            Some(DisplayRow::Group {
+                category, count, ..
+            }) => {
                 format!("{} \u{2014} {} item(s)", category.plural_label(), count)
             }
             None => String::new(),
@@ -493,10 +552,7 @@ impl App {
             self.status = if !item.is_safe_to_delete() {
                 format!("Cannot toggle: {} is active.", item.name)
             } else {
-                format!(
-                    "Cannot toggle: {} previously failed to delete.",
-                    item.name
-                )
+                format!("Cannot toggle: {} previously failed to delete.", item.name)
             };
             return;
         }
@@ -519,7 +575,11 @@ impl App {
             .filter(|i| self.selected.contains(&(i.source.clone(), i.id.clone())))
             .map(|i| i.size_bytes)
             .sum();
-        format!("Selected {} item(s) ({}) total.", count, format_size(total as i64, true))
+        format!(
+            "Selected {} item(s) ({}) total.",
+            count,
+            format_size(total as i64, true)
+        )
     }
 
     fn toggle_cursor_group(&mut self) {
@@ -544,11 +604,7 @@ impl App {
         // Content starts at sa.y + 1 (top border) and ends at sa.y + sa.height - 1 (bottom border).
         if x >= sa.x && x < sa.x + sa.width && y > sa.y && y < sa.y + sa.height - 1 {
             let line_idx = (y - sa.y - 1) as usize;
-            let engines: Vec<String> = self
-                .orchestrator
-                .available_engines()
-                .into_iter()
-                .collect();
+            let engines: Vec<String> = self.orchestrator.available_engines().into_iter().collect();
             if let Some(engine) = engines.get(line_idx) {
                 self.scroll_to_engine(engine);
             }
@@ -574,17 +630,18 @@ impl App {
         self.items = result.items;
         self.rebuild_display_rows();
         if err_count > 0 {
-            self.status = format!(
-                "Found {} item(s) with {} error(s).",
-                item_count, err_count
-            );
+            self.status = format!("Found {} item(s) with {} error(s).", item_count, err_count);
         } else {
             self.status = format!("Found {} item(s).", item_count);
         }
         // Preserve scroll position if possible, otherwise select first item.
         if self.display_rows.is_empty() {
             self.table_state.select(None);
-        } else if self.table_state.selected().map_or(true, |i| i >= self.display_rows.len()) {
+        } else if self
+            .table_state
+            .selected()
+            .map_or(true, |i| i >= self.display_rows.len())
+        {
             self.table_state.select(Some(0));
         }
         self.busy = false;
@@ -613,23 +670,38 @@ impl App {
         let fail = results.len() - ok;
         for r in &results {
             if r.success {
-                self.selected.remove(&(r.item.source.clone(), r.item.id.clone()));
+                self.selected
+                    .remove(&(r.item.source.clone(), r.item.id.clone()));
             }
         }
         // Mark successfully deleted items instead of removing them.
         for r in &results {
             if r.success {
-                if let Some(item) = self.items.iter_mut().find(|i| i.source == r.item.source && i.id == r.item.id) {
+                if let Some(item) = self
+                    .items
+                    .iter_mut()
+                    .find(|i| i.source == r.item.source && i.id == r.item.id)
+                {
                     item.status = Status::Deleted;
                 }
-                self.delete_errors.remove(&(r.item.source.clone(), r.item.id.clone()));
+                self.delete_errors
+                    .remove(&(r.item.source.clone(), r.item.id.clone()));
             } else if let Some(err) = &r.error {
                 let key = (r.item.source.clone(), r.item.id.clone());
                 self.delete_errors.insert(key, err.to_string());
             }
         }
-        let freed: u64 = results.iter().filter(|r| r.success).map(|r| r.item.size_bytes).sum();
-        self.status = format!("Deleted {}, failed {}. Freed {}.", ok, fail, format_size(freed as i64, true));
+        let freed: u64 = results
+            .iter()
+            .filter(|r| r.success)
+            .map(|r| r.item.size_bytes)
+            .sum();
+        self.status = format!(
+            "Deleted {}, failed {}. Freed {}.",
+            ok,
+            fail,
+            format_size(freed as i64, true)
+        );
         self.busy = false;
         self.rebuild_display_rows();
     }
@@ -768,7 +840,9 @@ fn draw_table(f: &mut ratatui::Frame, app: &mut App, area: Rect) {
                 let render = app.describe_item_row(item);
                 let style = match (render.color, render.italic) {
                     (ItemRowColor::Default, false) => Style::default(),
-                    (ItemRowColor::Default, true) => Style::default().add_modifier(Modifier::ITALIC),
+                    (ItemRowColor::Default, true) => {
+                        Style::default().add_modifier(Modifier::ITALIC)
+                    }
                     (ItemRowColor::Red, _) => Style::default().fg(Color::Red),
                 };
                 Row::new(vec![
@@ -777,7 +851,8 @@ fn draw_table(f: &mut ratatui::Frame, app: &mut App, area: Rect) {
                     Cell::from(item.status.as_str().to_string()),
                     Cell::from(format_size(item.size_bytes as i64, true)),
                     Cell::from(render.name),
-                ]).style(style)
+                ])
+                .style(style)
             }
         })
         .collect();
@@ -814,8 +889,8 @@ fn draw_table(f: &mut ratatui::Frame, app: &mut App, area: Rect) {
 }
 
 fn draw_status(f: &mut ratatui::Frame, status: &str, area: Rect) {
-    let widget = Paragraph::new(Line::from(Span::raw(status)))
-        .block(Block::default().borders(Borders::TOP));
+    let widget =
+        Paragraph::new(Line::from(Span::raw(status))).block(Block::default().borders(Borders::TOP));
     f.render_widget(widget, area);
 }
 
@@ -906,12 +981,12 @@ fn draw_dashboard(f: &mut ratatui::Frame, app: &App, area: Rect) {
 ///     (the intermediate empty span is preserved, only the final
 ///     terminator is silently dropped); the helper rejoins this
 ///     as `"\n"`.
-/// In general, *intermediate* empty lines between two `\n`s are
-/// preserved end-to-end.  `ratatui::Paragraph` does not require a
-/// trailing newline, and `draw_dashboard` does not depend on one,
-/// so the asymmetry is harmless at the only call site.  A future
-/// caller that renders into a tool which *does* depend on a
-/// trailing newline should append one manually.
+///     In general, *intermediate* empty lines between two `\n`s are
+///     preserved end-to-end.  `ratatui::Paragraph` does not require a
+///     trailing newline, and `draw_dashboard` does not depend on one,
+///     so the asymmetry is harmless at the only call site.  A future
+///     caller that renders into a tool which *does* depend on a
+///     trailing newline should append one manually.
 fn truncate_to_width_lines(s: &str, max_width: usize) -> String {
     if max_width == 0 {
         return String::new();
@@ -1005,8 +1080,7 @@ mod tests {
         let mut app = empty_app();
         let item = make_item("a", "docker", Status::Unused, Category::Image);
         app.items.push(item.clone());
-        app.selected
-            .insert((item.source.clone(), item.id.clone()));
+        app.selected.insert((item.source.clone(), item.id.clone()));
         let render = app.describe_item_row(&item);
         assert_eq!(render.mark, "x");
         assert_eq!(render.name, "a");
@@ -1038,10 +1112,8 @@ mod tests {
         let mut app = empty_app();
         let item = make_item("a", "docker", Status::Unused, Category::Image);
         app.items.push(item.clone());
-        app.delete_errors.insert(
-            (item.source.clone(), item.id.clone()),
-            "boom".to_string(),
-        );
+        app.delete_errors
+            .insert((item.source.clone(), item.id.clone()), "boom".to_string());
         let render = app.describe_item_row(&item);
         assert_eq!(render.mark, "\u{2716}");
         assert_eq!(render.name, "a (failed)");
@@ -1056,12 +1128,9 @@ mod tests {
         let mut app = empty_app();
         let item = make_item("a", "docker", Status::Unused, Category::Image);
         app.items.push(item.clone());
-        app.selected
-            .insert((item.source.clone(), item.id.clone()));
-        app.delete_errors.insert(
-            (item.source.clone(), item.id.clone()),
-            "boom".to_string(),
-        );
+        app.selected.insert((item.source.clone(), item.id.clone()));
+        app.delete_errors
+            .insert((item.source.clone(), item.id.clone()), "boom".to_string());
         let render = app.describe_item_row(&item);
         assert_eq!(render.mark, "\u{2716}");
         assert_eq!(render.name, "a (failed)");
@@ -1077,10 +1146,8 @@ mod tests {
         let mut app = empty_app();
         let item = make_item("a", "docker", Status::Deleted, Category::Image);
         app.items.push(item.clone());
-        app.delete_errors.insert(
-            (item.source.clone(), item.id.clone()),
-            "boom".to_string(),
-        );
+        app.delete_errors
+            .insert((item.source.clone(), item.id.clone()), "boom".to_string());
         let render = app.describe_item_row(&item);
         assert_eq!(render.mark, "\u{2717}");
         assert_eq!(render.name, "a (deleted)");
@@ -1230,7 +1297,10 @@ mod tests {
         // (an easy regression) `byte_count = 3` and we'd truncate
         // even at `max_width = 2`.  Char-counting keeps the line
         // intact.
-        assert_eq!(truncate_to_width_lines("\u{00bd}\u{00bd}", 2), "\u{00bd}\u{00bd}");
+        assert_eq!(
+            truncate_to_width_lines("\u{00bd}\u{00bd}", 2),
+            "\u{00bd}\u{00bd}"
+        );
         // 3 chars, max 2 → keep first char + ellipsis = 2 visible chars.
         assert_eq!(
             truncate_to_width_lines("\u{00bd}\u{00bd}\u{00bd}", 2),

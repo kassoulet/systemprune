@@ -51,10 +51,7 @@ impl Scanner for OllamaScanner {
 
     async fn get_items(&self) -> Result<Vec<PrunableItem>, EngineError> {
         let loaded = self.loaded_model_names().await;
-        let (out, _) = self
-            .base
-            .run(&["ollama", "list"], TIMEOUT_SECS)
-            .await?;
+        let (out, _) = self.base.run(&["ollama", "list"], TIMEOUT_SECS).await?;
         let mut items: Vec<PrunableItem> = Vec::new();
         for line in out.lines() {
             let line = line.trim();
@@ -108,7 +105,10 @@ impl OllamaScanner {
                 caps.name("id")?.as_str().to_string(),
             ));
         }
-        let parts: Vec<&str> = FALLBACK_SEP.split(line.trim()).filter(|s| !s.is_empty()).collect();
+        let parts: Vec<&str> = FALLBACK_SEP
+            .split(line.trim())
+            .filter(|s| !s.is_empty())
+            .collect();
         if parts.len() >= 3 {
             return Some((
                 parts[0].to_string(),

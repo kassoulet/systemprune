@@ -31,7 +31,11 @@ fn is_safe_to_delete_true_for_non_active() {
             status,
             extra: BTreeMap::new(),
         };
-        assert!(item.is_safe_to_delete(), "status {:?} should be safe", status);
+        assert!(
+            item.is_safe_to_delete(),
+            "status {:?} should be safe",
+            status
+        );
     }
 }
 
@@ -175,16 +179,10 @@ fn is_deletable_for_real_error_key_must_match_source_and_id() {
     // affect this item.
     let item = unused("a", "docker");
     let mut errors: BTreeMap<(String, String), String> = BTreeMap::new();
-    errors.insert(
-        ("ollama".to_string(), "a".to_string()),
-        "boom".to_string(),
-    );
+    errors.insert(("ollama".to_string(), "a".to_string()), "boom".to_string());
     assert!(item.is_deletable_for_real(&errors));
 
     errors.clear();
-    errors.insert(
-        ("docker".to_string(), "b".to_string()),
-        "boom".to_string(),
-    );
+    errors.insert(("docker".to_string(), "b".to_string()), "boom".to_string());
     assert!(item.is_deletable_for_real(&errors));
 }
